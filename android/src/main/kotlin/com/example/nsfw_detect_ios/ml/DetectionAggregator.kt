@@ -15,7 +15,7 @@ package com.example.nsfw_detect_ios.ml
  *  2. **NSFW boost.** Any `*_EXPOSED` detection that survived NudeNet's
  *     IoU + detection-confidence threshold is treated as authoritative —
  *     its aggregated category's confidence is bumped to **1.0** so
- *     `isNsfw`, the gallery filter, and the upload trigger all fire
+ *     `isNsfw` and the gallery filter all fire
  *     reliably. Per-box scores in the original detections list are
  *     unaffected.
  *  3. Final sort: NSFW priority bucket first, confidence second.

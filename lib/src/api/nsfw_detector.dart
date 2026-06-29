@@ -404,6 +404,23 @@ class NsfwDetector {
   Future<PhotoLibraryPermissionStatus> checkPermission() =>
       _platform.checkPermission();
 
+  /// Reports whether the host app declared the platform setup keys the
+  /// media / camera APIs depend on (`Info.plist` on iOS,
+  /// `AndroidManifest.xml` on Android). Reads files only — never triggers
+  /// the OS permission layer, so calling this is safe before any media
+  /// API. Use it at startup to short-circuit `pickAndScan` / `startScan`
+  /// with a developer-visible "Info.plist missing" message instead of the
+  /// SIGABRT iOS hands you when the key is absent.
+  ///
+  /// ```dart
+  /// final setup = await NsfwDetector.instance.checkPlatformSetup();
+  /// if (!setup.isComplete) {
+  ///   debugPrint('Add to Info.plist: ${setup.missingKeys.join(', ')}');
+  /// }
+  /// ```
+  Future<PlatformSetupReport> checkPlatformSetup() =>
+      _platform.checkPlatformSetup();
+
   /// Returns the current camera-permission status.
   ///
   /// Falls back to [PermissionStatus.notDetermined] when the platform
@@ -679,6 +696,24 @@ class NsfwDetector {
     );
     return result;
   }
+
+  /// Loads a downscaled JPEG thumbnail for the photo-library asset identified
+  /// by [localIdentifier] — handy for rendering a preview next to a
+  /// [ScanResult] without pulling in a separate photo-library package.
+  ///
+  /// Returns `null` when the asset can't be resolved or decoded (e.g. it was
+  /// deleted, or lives in iCloud and is unavailable offline). [maxWidth] /
+  /// [maxHeight] bound the result in logical pixels; aspect ratio is preserved.
+  Future<Uint8List?> loadThumbnail(
+    String localIdentifier, {
+    int maxWidth = 256,
+    int maxHeight = 256,
+  }) =>
+      _platform.loadThumbnail(
+        localIdentifier,
+        maxWidth: maxWidth,
+        maxHeight: maxHeight,
+      );
 
   /// Shows the native photo/video picker, then scans the selected items.
   /// [maxItems] — max selectable items (0 = unlimited). Default: 1.

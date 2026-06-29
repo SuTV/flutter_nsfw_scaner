@@ -43,7 +43,10 @@ export 'src/api/camera_scan_session.dart';
 export 'src/api/camera_exceptions.dart';
 export 'src/api/permissions/permission_kind.dart';
 export 'src/platform/nsfw_platform_interface.dart'
-    show PhotoLibraryPermissionStatus, NsfwUninitializedPlatform;
+    show
+        PhotoLibraryPermissionStatus,
+        PlatformSetupReport,
+        NsfwUninitializedPlatform;
 export 'src/widgets/nsfw_permissions_view.dart';
 export 'src/widgets/nsfw_gallery_view.dart';
 export 'src/widgets/nsfw_media_tile.dart';

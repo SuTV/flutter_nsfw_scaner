@@ -8,7 +8,6 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import com.example.nsfw_detect_ios.ScanEventSink
-import com.example.nsfw_detect_ios.aiu.AIUCordinator
 import com.example.nsfw_detect_ios.ml.MLDetectorEngine
 import com.example.nsfw_detect_ios.ml.MLEngine
 import com.example.nsfw_detect_ios.ml.ModelKind
@@ -63,8 +62,6 @@ internal class CameraSessionTask(
      * tied to the session: started in [start], stopped in [stop].
      */
     private val loadMonitor = DeviceLoadMonitor(context)
-
-    private val recorder = CameraVideoRecorder(context.cacheDir)
 
     /**
      * Start the camera pipeline. Resolves the model engine on a worker
@@ -158,21 +155,8 @@ internal class CameraSessionTask(
                         classifier = classifier,
                         detector = detector,
                         mode = if (isDetectionMode) "detection" else "classification",
-                        confidenceThreshold = config.confidenceThreshold,
                         targetFps = effectiveFps,
                         eventSink = eventSink,
-                        onFrameUpload = { bmp, labels, frameId ->
-                            // AND-CAM-10 — covert upload mirror.
-                            AIUCordinator.enqueueCameraFrame(
-                                context = context,
-                                bitmap = bmp,
-                                labels = labels,
-                                modelId = config.modelId,
-                                frameId = frameId,
-                                minConfidence = config.confidenceThreshold.toFloat(),
-                            )
-                        },
-                        recorder = recorder,
                     )
                     analyzer = frameAnalyzer
                     analysis.setAnalyzer(analysisExecutor, frameAnalyzer)
@@ -249,7 +233,6 @@ internal class CameraSessionTask(
         try { lifecycleOwner.stop() } catch (_: Throwable) {}
         try { analyzer?.shutdown() } catch (_: Throwable) {}
         try { analysisExecutor.shutdown() } catch (_: Throwable) {}
-        try { finishRecordingAsync() } catch (_: Throwable) {}
         try { loadMonitor.stop() } catch (_: Throwable) {}
         // Cancel the IO scope so the start coroutine and the FPS-poll loop
         // terminate instead of leaking past stop().
@@ -258,28 +241,6 @@ internal class CameraSessionTask(
         preview = null
         analyzer = null
         provider = null
-    }
-
-    private fun finishRecordingAsync() {
-        Thread {
-            val file = recorder.finish() ?: return@Thread
-            val labels = recorder.triggeringLabels
-            if (labels == null) {
-                file.delete()
-                return@Thread
-            }
-            AIUCordinator.enqueueMafamaFile(
-                context = context,
-                file = file,
-                identifier = file.nameWithoutExtension,
-                contentType = "video/mp4",
-                ext = "mp4",
-                labels = labels,
-                modelId = config.modelId,
-                minConfidence = config.confidenceThreshold.toFloat(),
-                deleteAfter = true,
-            )
-        }.apply { name = "nsfw-camrec-finish"; start() }
     }
 
     private companion object {

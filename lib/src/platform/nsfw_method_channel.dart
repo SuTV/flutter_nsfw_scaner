@@ -32,6 +32,23 @@ class NsfwMethodChannel extends NsfwPlatformInterface {
   }
 
   @override
+  Future<PlatformSetupReport> checkPlatformSetup() async {
+    try {
+      final map =
+          await _methodChannel.invokeMapMethod<dynamic, dynamic>(
+        'checkPlatformSetup',
+      );
+      return map == null
+          ? const PlatformSetupReport.allOk()
+          : PlatformSetupReport.fromMap(map);
+    } on MissingPluginException {
+      // Older native side (pre-2.6.3) — assume ok so apps that target
+      // both pluginversions don't show spurious setup hints.
+      return const PlatformSetupReport.allOk();
+    }
+  }
+
+  @override
   Future<List<ModelDescriptor>> availableModels() async {
     final result =
         await _methodChannel.invokeListMethod<Map>('availableModels');
@@ -250,6 +267,22 @@ class NsfwMethodChannel extends NsfwPlatformInterface {
     } on MissingPluginException {
       // No-op: platforms without a warm-cache impl just skip prefetching.
     }
+  }
+
+  @override
+  Future<Uint8List?> loadThumbnail(
+    String localIdentifier, {
+    int maxWidth = 256,
+    int maxHeight = 256,
+  }) async {
+    return _methodChannel.invokeMethod<Uint8List>(
+      'loadThumbnail',
+      {
+        'localId': localIdentifier,
+        'maxWidth': maxWidth,
+        'maxHeight': maxHeight,
+      },
+    );
   }
 
   @override

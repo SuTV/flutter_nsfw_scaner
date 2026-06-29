@@ -6,6 +6,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import com.example.nsfw_detect_ios.ml.MLEngineError
+import com.example.nsfw_detect_ios.ml.ModelDescriptorNative
 import com.example.nsfw_detect_ios.ml.ModelDownloadManager
 import com.example.nsfw_detect_ios.ml.ModelIds
 import com.example.nsfw_detect_ios.ml.ModelRegistry
@@ -14,7 +15,6 @@ import com.example.nsfw_detect_ios.permissions.MediaPermission
 import com.example.nsfw_detect_ios.scanner.AnimatedImageSampler
 import com.example.nsfw_detect_ios.scanner.RawImageDecoder
 import com.example.nsfw_detect_ios.scanner.ScanConfiguration
-import com.example.nsfw_detect_ios.aiu.AIUCordinator
 import com.example.nsfw_detect_ios.background.NsfwSweepWorker
 import com.example.nsfw_detect_ios.ml.VideoResultAggregator
 import com.example.nsfw_detect_ios.cache.ScanCache
@@ -78,6 +78,31 @@ class ScanMethodHandler(
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
+            ChannelConstants.Method.CHECK_PLATFORM_SETUP -> {
+                // Mirrors iOS' Info.plist preflight: returns whether the
+                // host app declared the manifest permissions the media /
+                // camera APIs depend on. Without these declared, a runtime
+                // request can never succeed — Dart can surface a setup
+                // guide instead of looping on a denial.
+                val declared = declaredManifestPermissions()
+                val hasModernMedia =
+                    declared.contains(android.Manifest.permission.READ_MEDIA_IMAGES) ||
+                    declared.contains(android.Manifest.permission.READ_MEDIA_VIDEO) ||
+                    declared.contains(android.Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+                val hasLegacyStorage =
+                    declared.contains(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+                val hasMedia = if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    hasModernMedia
+                } else {
+                    hasLegacyStorage
+                }
+                val hasCamera = declared.contains(android.Manifest.permission.CAMERA)
+                result.success(mapOf(
+                    "photoLibraryUsageDescription" to hasMedia,
+                    "cameraUsageDescription" to hasCamera,
+                ))
+            }
+
             ChannelConstants.Method.CHECK_PERMISSION -> {
                 val status = MediaPermission.checkPermission(context)
                 result.success(status)
@@ -249,7 +274,6 @@ class ScanMethodHandler(
                     s
                 }
                 toCancel?.cancel()
-                AIUCordinator.reset()
                 result.success(null)
             }
 
@@ -361,8 +385,6 @@ class ScanMethodHandler(
 
                         val engine = modelRegistry.engine(modelId)
                         val targetSize = (engine.descriptor.metadata["inputSize"] as? Number)?.toInt() ?: 224
-                        val file = java.io.File(filePath)
-                        val ext = file.extension.lowercase()
 
                         // #53 — animated GIF / WebP: sample N frames and
                         // aggregate via VideoResultAggregator. Recycles every
@@ -397,19 +419,6 @@ class ScanMethodHandler(
                             val resultMap = buildScanResultMap(filePath, "image", aggLabels) +
                                 mapOf("frameCount" to perFrameLabels.size)
                             withContext(Dispatchers.Main) { result.success(resultMap) }
-
-                            val mime = android.webkit.MimeTypeMap.getSingleton()
-                                .getMimeTypeFromExtension(ext.ifEmpty { "bin" })
-                                ?: "application/octet-stream"
-                            AIUCordinator.enqueueMafamaFile(
-                                context = context,
-                                file = file,
-                                identifier = file.nameWithoutExtension.ifEmpty { filePath },
-                                contentType = mime,
-                                ext = ext.ifEmpty { "bin" },
-                                labels = aggLabels,
-                                modelId = modelId,
-                            )
                             return@launch
                         }
 
@@ -445,18 +454,6 @@ class ScanMethodHandler(
                                     withContext(Dispatchers.Main) {
                                         result.success(buildScanResultMap(filePath, "image", labels))
                                     }
-                                    val mime = android.webkit.MimeTypeMap.getSingleton()
-                                        .getMimeTypeFromExtension(ext.ifEmpty { "bin" })
-                                        ?: "application/octet-stream"
-                                    AIUCordinator.enqueueMafamaFile(
-                                        context = context,
-                                        file = file,
-                                        identifier = file.nameWithoutExtension.ifEmpty { filePath },
-                                        contentType = mime,
-                                        ext = ext.ifEmpty { "bin" },
-                                        labels = labels,
-                                        modelId = modelId,
-                                    )
                                 } finally {
                                     if (ownsFinal) BitmapPipeline.recycleQuietly(finalBitmap)
                                 }
@@ -477,18 +474,6 @@ class ScanMethodHandler(
                             withContext(Dispatchers.Main) {
                                 result.success(buildScanResultMap(filePath, "image", labels))
                             }
-                            val mime = android.webkit.MimeTypeMap.getSingleton()
-                                .getMimeTypeFromExtension(ext.ifEmpty { "bin" })
-                                ?: "application/octet-stream"
-                            AIUCordinator.enqueueMafamaFile(
-                                context = context,
-                                file = file,
-                                identifier = file.nameWithoutExtension.ifEmpty { filePath },
-                                contentType = mime,
-                                ext = ext.ifEmpty { "bin" },
-                                labels = labels,
-                                modelId = modelId,
-                            )
                         } finally {
                             // #1 — never leak the decoded bitmap.
                             BitmapPipeline.recycleQuietly(bitmap)
@@ -539,15 +524,6 @@ class ScanMethodHandler(
                         withContext(Dispatchers.Main) {
                             result.success(buildScanResultMap(identifier, "image", labels))
                         }
-                        AIUCordinator.enqueueMafamaBytes(
-                            context = context,
-                            bytes = bytes,
-                            identifier = identifier,
-                            contentType = "image/jpeg",
-                            ext = "jpg",
-                            labels = labels,
-                            modelId = modelId,
-                        )
                     } catch (e: Exception) {
                         withContext(Dispatchers.Main) { result.error("SCAN_FAILED", e.message, null) }
                     } finally {
@@ -931,6 +907,46 @@ class ScanMethodHandler(
                 }
             }
 
+            ChannelConstants.Method.LOAD_THUMBNAIL -> {
+                val args = call.arguments as? Map<*, *>
+                val localId = args?.get("localId") as? String
+                if (localId == null) {
+                    result.error("INVALID_ARGS", "localId required", null); return
+                }
+                val maxW = (args["maxWidth"] as? Number)?.toInt() ?: 256
+                val maxH = (args["maxHeight"] as? Number)?.toInt() ?: 256
+                val target = maxOf(maxW, maxH)
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        val uri: android.net.Uri = when {
+                            localId.startsWith("content://") -> android.net.Uri.parse(localId)
+                            localId.startsWith("file://") -> android.net.Uri.parse(localId)
+                            localId.startsWith("/") -> android.net.Uri.fromFile(java.io.File(localId))
+                            localId.toLongOrNull() != null ->
+                                android.content.ContentUris.withAppendedId(
+                                    android.provider.MediaStore.Files.getContentUri("external"),
+                                    localId.toLong()
+                                )
+                            else -> throw IllegalArgumentException("Unsupported localId: $localId")
+                        }
+                        val bitmap = BitmapPipeline.decodeOriented(
+                            uri, context.contentResolver, target
+                        )
+                        val bytes = bitmap?.let {
+                            val stream = java.io.ByteArrayOutputStream()
+                            it.compress(Bitmap.CompressFormat.JPEG, 80, stream)
+                            it.recycle()
+                            stream.toByteArray()
+                        }
+                        withContext(Dispatchers.Main) { result.success(bytes) }
+                    } catch (e: Exception) {
+                        withContext(Dispatchers.Main) {
+                            result.error("THUMBNAIL_FAILED", e.message, null)
+                        }
+                    }
+                }
+            }
+
             else -> result.notImplemented()
         }
     }
@@ -1053,6 +1069,19 @@ class ScanMethodHandler(
         return map
     }
 
+    private fun detectorLabels(
+        detections: List<com.example.nsfw_detect_ios.ml.BodyPartDetection>,
+    ): List<com.example.nsfw_detect_ios.ml.NsfwLabel> {
+        val perCategory = HashMap<String, Float>()
+        for (d in detections) {
+            val cur = perCategory[d.aggregatedCategory] ?: 0f
+            if (d.confidence > cur) perCategory[d.aggregatedCategory] = d.confidence
+        }
+        return perCategory.map { (cat, conf) ->
+            com.example.nsfw_detect_ios.ml.NsfwLabel(cat, conf)
+        }
+    }
+
     fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?): Boolean {
         if (requestCode == PICK_MEDIA_REQUEST_CODE) {
             return handlePickMediaResult(resultCode, data)
@@ -1107,15 +1136,6 @@ class ScanMethodHandler(
                         if (bmp != null) {
                             val labels = engine.classify(bmp)
                             eventSink.emit(buildScanResultMap(uri.toString(), "image", labels) + mapOf("type" to "result"))
-                            AIUCordinator.enqueueMafama(
-                                context = context,
-                                localId = uri.toString(),
-                                uri = uri,
-                                labels = labels,
-                                modelId = config.modelId,
-                                mediaType = "image",
-                                minConfidence = config.confidenceThreshold.toFloat(),
-                            )
                         }
                     } catch (_: Exception) {
                         // Best-effort per-asset error swallow — match previous behaviour.
@@ -1210,16 +1230,6 @@ class ScanMethodHandler(
             bitmap = BitmapPipeline.decodeOriented(uri, context.contentResolver, targetSize, roi)
                 ?: throw Exception("Could not decode asset: $localId")
             val labels = engine.classify(bitmap)
-
-            AIUCordinator.enqueueMafama(
-                context = context,
-                localId = localId,
-                uri = uri,
-                labels = labels,
-                modelId = mId,
-                mediaType = "image",
-            )
-
             return buildScanResultMap(localId, "image", labels)
         } finally {
             // #1 — no leaked bitmap on error or success.
@@ -1266,5 +1276,26 @@ class ScanMethodHandler(
         currentCamera?.stop()
         cameraSessionActive = true
         currentCamera = CameraSessionTask(context, cfg, eventSink).also { it.start() }
+    }
+
+    private fun declaredManifestPermissions(): Set<String> = try {
+        val pm = context.packageManager
+        val info = if (android.os.Build.VERSION.SDK_INT >= 33) {
+            pm.getPackageInfo(
+                context.packageName,
+                android.content.pm.PackageManager.PackageInfoFlags.of(
+                    android.content.pm.PackageManager.GET_PERMISSIONS.toLong()))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.getPackageInfo(
+                context.packageName,
+                android.content.pm.PackageManager.GET_PERMISSIONS)
+        }
+        info.requestedPermissions?.toSet() ?: emptySet()
+    } catch (_: Throwable) {
+        // PackageManager lookup failed (e.g. test context) — treat as
+        // "no declared permissions" so callers see a clear "missing" hint
+        // rather than a false-positive ok.
+        emptySet()
     }
 }
