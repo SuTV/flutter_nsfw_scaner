@@ -11,6 +11,10 @@
 
 import 'package:flutter/material.dart';
 import 'package:nsfw_detect/nsfw_detect.dart';
+// NsfwWebConfig lives in the web-only plugin file (dart:html/package:web deps),
+// so it can't be re-exported from nsfw_detect.dart without breaking mobile
+// analysis. This example runs on web only, where the import is safe.
+// ignore: implementation_imports
 import 'package:nsfw_detect/src/platform/nsfw_web.dart' show NsfwWebConfig;
 
 void main() => runApp(const WebDemoApp());
