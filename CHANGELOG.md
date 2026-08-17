@@ -1,3 +1,54 @@
+## 2.7.0
+
+> Adds native **asset management** on the *original* photo-library item: favorite, hide, delete, and album add/remove/move. All operate on the real `PHAsset` via PhotoKit and require `.readWrite` authorization (already requested by `requestPermission()` — no new Info.plist key). Additive only.
+
+### Added
+
+- **`NsfwDetector.instance.setAssetFavorite(localId, favorite:)`** — toggles the Photos favorite flag. Reversible, no system prompt.
+- **`setAssetHidden(localId, hidden:)`** — moves the asset to / from the (possibly Face-ID-locked) "Hidden" album.
+- **`deleteAssets(localIds)`** — deletes via `PHAssetChangeRequest.deleteAssets`. iOS shows its **own** confirmation alert and routes items to "Recently Deleted" (30-day grace); returns `true` when the user confirmed, `false` when they cancelled.
+- **`listAlbums()` → `List<PhotoAlbum>`** — user (editable) albums with `{id, title, count}`. Smart/system albums are excluded since they reject membership changes.
+- **`createAlbum(title)` → album id**, **`addAssetsToAlbum`**, **`removeAssetsFromAlbum`**, and **`moveAssetsToAlbum(ids, toAlbumId, fromAlbumId:)`**. "Move" = add to target + remove from the source *user* album; iOS albums are membership sets (not folders), so assets always remain in "Recents", and a smart-album source is left intact.
+- **`PhotoAlbum`** — new value type exposed at the package root.
+- **`NsfwDetector.instance.startScanEnsemble(strategy, config:)`** — batch
+  **ensemble** scan over the whole library. The native session path is
+  single-model only, so this is Dart-driven: it enumerates image assets (newest
+  first) via the new `listAssetIdentifiers` channel method and runs each through
+  `scanAssetEnsemble`, streaming combined `ScanResult`s + progress on a normal
+  `ScanSession` (same `results`/`progress`/`done`/`cancel` surface as
+  `startScan`). Sequential by design — ensemble trades speed for accuracy.
+  Honours `config.confidenceThreshold` / `config.region` and the
+  `includeOnlyAssetIds` / `skipAssetIds` filters; classifier-only.
+
+### Notes
+
+- iOS-only for now (this is `nsfw_detect_ios`). Android (`MediaStore` trash/favorite/move semantics) lands with the Android port.
+- All operations go through `PHPhotoLibrary.performChanges`; failures surface as `FlutterError` codes (`FAVORITE_FAILED`, `HIDE_FAILED`, `DELETE_FAILED`, `CREATE_ALBUM_FAILED`, `ADD_TO_ALBUM_FAILED`, `REMOVE_FROM_ALBUM_FAILED`, `MOVE_FAILED`, `PERMISSION_DENIED`, `ALBUM_NOT_FOUND`).
+
+## 2.6.4
+
+- fix Readme
+
+## 2.6.3 — 2026-05-25
+
+> Adds a host-app setup preflight so missing `Info.plist` keys / `AndroidManifest.xml` permissions surface as a clean Dart error instead of an iOS `SIGABRT`. Closes a long-standing footgun where `pickAndScan` / `pickMedia` would terminate the host process on the first call when `NSPhotoLibraryUsageDescription` was absent — even though `PHPickerViewController` itself doesn't read that key. Additive only.
+
+### Added
+
+- **`NsfwDetector.instance.checkPlatformSetup()`** — returns a `PlatformSetupReport` describing which platform usage descriptions / manifest permissions the host app declared. Reads `Info.plist` (iOS) or `PackageInfo.requestedPermissions` (Android) only; never triggers the OS permission layer, so it's safe at startup. Use `report.isComplete` / `report.missingKeys` to gate media APIs and show a setup-guide UI when keys are missing.
+- **`PlatformSetupReport`** — new value type exposed at the package root with `photoLibraryUsageDescription`, `cameraUsageDescription`, `isComplete`, and `missingKeys` (list of key names like `'NSPhotoLibraryUsageDescription'` for hint UIs).
+- **iOS `PhotoLibraryPermission.hostHasUsageDescription`** — mirrors the existing `CameraPermission.hostHasUsageDescription`. Internal preflight used by every photo-library code path.
+
+### Fixed
+
+- **iOS `pickAndScan` / `pickMedia` — no more `SIGABRT` on missing `NSPhotoLibraryUsageDescription`.** Even though `PHPickerViewController` grants per-item access without a runtime prompt, the plugin resolves the returned `PHAsset` identifiers to pull bytes/metadata, and iOS' TCC layer terminates the process if the usage key is absent. `pickAndScan`, `pickMedia`, `startScan`, `scanSingleAsset`, and `requestPermission` now preflight `Bundle.main.object(forInfoDictionaryKey:)` and return `FlutterError(code: "MISSING_USAGE_DESCRIPTION", …)` when the key is missing — matching the existing camera-path behaviour.
+- **README — `pickMedia` / `pickAndScan` permission row corrected.** Earlier docs claimed "none (per-item access)" for the iOS column. Apps shipping without `NSPhotoLibraryUsageDescription` crashed on the first scan despite following the table. The Install section now leads with a prominent "REQUIRED PLATFORM SETUP" block with ready-to-paste `Info.plist` and `AndroidManifest.xml` snippets, and the Permissions table calls out the real requirement.
+
+### Behaviour notes
+
+- The preflight is additive: when the keys are declared (the normal case), every existing API behaves identically.
+- Older host apps that never integrated `checkPlatformSetup()` keep working — Dart catches `MissingPluginException` from pre-2.6.3 natives and resolves to "all ok" so cross-version consumers don't see false negatives.
+
 ## 2.6.2 — 2026-05-23
 
 > Fixes a noisy `EventChannel` crash on iOS after a scan finishes, and brings Android's `pickMedia` / `pickAndScan` up to iOS parity for multi-select. No API changes.

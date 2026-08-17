@@ -22,6 +22,7 @@ export 'src/api/scan_region.dart';
 export 'src/api/body_part_detection.dart';
 export 'src/api/scan_session.dart';
 export 'src/api/picked_media.dart';
+export 'src/api/photo_album.dart';
 export 'src/api/media_picker_type.dart';
 export 'src/api/scan_decision.dart';
 export 'src/api/scan_summary.dart';
@@ -43,7 +44,10 @@ export 'src/api/camera_scan_session.dart';
 export 'src/api/camera_exceptions.dart';
 export 'src/api/permissions/permission_kind.dart';
 export 'src/platform/nsfw_platform_interface.dart'
-    show PhotoLibraryPermissionStatus, NsfwUninitializedPlatform;
+    show
+        PhotoLibraryPermissionStatus,
+        PlatformSetupReport,
+        NsfwUninitializedPlatform;
 export 'src/widgets/nsfw_permissions_view.dart';
 export 'src/widgets/nsfw_gallery_view.dart';
 export 'src/widgets/nsfw_media_tile.dart';

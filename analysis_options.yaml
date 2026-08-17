@@ -8,6 +8,13 @@ analyzer:
     - "**/*.g.dart"
     - "**/*.freezed.dart"
     - "build/**"
+    - "gen/**"       # separates Generator-Paket (publish_to: none), eigene deps
+    - android/**
+    - ios/**
+    - web/**
+    - windows/**
+    - macos/**
+    - linux/**
   errors:
     unused_import: error
     dead_code: error

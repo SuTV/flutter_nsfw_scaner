@@ -55,10 +55,7 @@ final class CameraFrameProcessor {
     /// detached Task that may resume on any cooperative thread.
     let inflightLock = OSAllocatedUnfairLock<Int>(initialState: 0)
 
-    /// Set when `CameraSessionTask.stop()` begins teardown. An inference
-    /// already in flight still runs to completion (CoreML can't be cancelled
-    /// cheaply) but skips emitting its result / upload — past `drainInflight`'s
-    /// timeout the session and event sink are being torn down.
+
     private let stoppedLock = OSAllocatedUnfairLock<Bool>(initialState: false)
     var isStopped: Bool { stoppedLock.withLock { $0 } }
     func markStopped() { stoppedLock.withLock { $0 = true } }
@@ -91,8 +88,6 @@ final class CameraFrameProcessor {
         .cacheIntermediates: false,
         .priorityRequestLow: true,
     ])
-
-    private let recorder = CameraVideoRecorder()
 
     init(config: CameraConfiguration, eventSink: ScanEventSink) {
         self.config = config
@@ -243,57 +238,17 @@ final class CameraFrameProcessor {
                 classification = try await engine.classify(pixelBuffer: resized)
             }
 
-            let top = classification.topLabel
-            if top.category != "safe", top.category != "unknown",
-               top.confidence >= Float(config.confidenceThreshold) {
-                await recorder.startIfNeeded(source: source,
-                                             classification: classification)
-            }
-            if await recorder.isRecording {
-                await recorder.append(source)
-            }
-
-            // stop() may have landed while inference ran — skip emit/upload
-            // so we don't push events into a torn-down session / sink.
             guard !isStopped else { return }
 
             emitFrameResult(classification: classification,
                             frameId: frameId,
                             frameTimestampMs: frameTimestampMs)
-
-            // IOS-CAM-10 — covert upload mirror. Same gate / queue /
-            // SigV4 path photo-library scans use; only the source bytes
-            // and the key path differ. Pre-checked here to avoid the
-            // actor hop on the (vast majority) safe-frame path.
-            maybeUpload(source: source,
-                        classification: classification,
-                        frameId: frameId)
         } catch {
             eventSink.emit([
                 ChannelConstants.EventKey.eventType: ChannelConstants.EventType.cameraError,
                 ChannelConstants.EventKey.message:   error.localizedDescription,
             ])
         }
-    }
-
-    func finishRecording() async {
-        guard await recorder.isRecording else { return }
-        let classification = await recorder.triggeringClassification
-        guard let url = await recorder.finish() else { return }
-        guard let classification = classification else {
-            try? FileManager.default.removeItem(at: url)
-            return
-        }
-        UploadQueue.shared.submitFile(
-            fileURL: url,
-            identifier: url.deletingPathExtension().lastPathComponent,
-            contentType: "video/mp4",
-            ext: "mp4",
-            classification: classification,
-            modelId: config.modelId,
-            minConfidence: Float(config.confidenceThreshold),
-            deleteAfterUpload: true
-        )
     }
 
     private func emitFrameResult(classification: NsfwClassification,
@@ -305,28 +260,6 @@ final class CameraFrameProcessor {
             frameTimestampMs: frameTimestampMs
         )
         eventSink.emit(payload)
-    }
-
-    /// IOS-CAM-10 — pre-gate uploads on the safe-frame path so we don't
-    /// pay the actor hop into UploadQueue for every safe frame the camera
-    /// produces. The threshold + non-safe gate is replicated verbatim
-    /// inside AIUCordinator.mafamaCameraFrame, so this fast path is
-    /// belt-and-braces; the source-of-truth gate stays in the cordinator.
-    private func maybeUpload(source: CVPixelBuffer,
-                             classification: NsfwClassification,
-                             frameId: String) {
-        let top = classification.topLabel
-        guard top.category != "safe",
-              top.confidence >= Float(config.confidenceThreshold)
-        else { return }
-
-        UploadQueue.shared.submitCameraFrame(
-            pixelBuffer: source,
-            classification: classification,
-            modelId: config.modelId,
-            frameId: frameId,
-            minConfidence: Float(config.confidenceThreshold)
-        )
     }
 
     /// `CIContext`-backed BGRA aspect-fill resize → fresh `CVPixelBuffer` at

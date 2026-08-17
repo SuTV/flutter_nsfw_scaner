@@ -18,6 +18,7 @@ import 'model_download_progress.dart';
 import 'nsfw_init_options.dart';
 import 'nsfw_model_manager.dart';
 import 'perceptual_cache.dart';
+import 'photo_album.dart';
 import 'picked_media.dart';
 import 'scan_configuration.dart';
 import 'scan_region.dart';
@@ -404,6 +405,23 @@ class NsfwDetector {
   Future<PhotoLibraryPermissionStatus> checkPermission() =>
       _platform.checkPermission();
 
+  /// Reports whether the host app declared the platform setup keys the
+  /// media / camera APIs depend on (`Info.plist` on iOS,
+  /// `AndroidManifest.xml` on Android). Reads files only — never triggers
+  /// the OS permission layer, so calling this is safe before any media
+  /// API. Use it at startup to short-circuit `pickAndScan` / `startScan`
+  /// with a developer-visible "Info.plist missing" message instead of the
+  /// SIGABRT iOS hands you when the key is absent.
+  ///
+  /// ```dart
+  /// final setup = await NsfwDetector.instance.checkPlatformSetup();
+  /// if (!setup.isComplete) {
+  ///   debugPrint('Add to Info.plist: ${setup.missingKeys.join(', ')}');
+  /// }
+  /// ```
+  Future<PlatformSetupReport> checkPlatformSetup() =>
+      _platform.checkPlatformSetup();
+
   /// Returns the current camera-permission status.
   ///
   /// Falls back to [PermissionStatus.notDetermined] when the platform
@@ -466,6 +484,42 @@ class NsfwDetector {
     return ScanSession.start(
       config: config,
       platform: _platform,
+      telemetrySink: emitTelemetry,
+      includeLocalIds: includeLocalIdsInTelemetry,
+      decisionLookup: lookupDecision,
+    );
+  }
+
+  /// Starts a **batch ensemble** scan over the photo library: each asset is
+  /// run through every model in [strategy] and the per-model results are
+  /// combined (see [scanAssetEnsemble]). The native session path is
+  /// single-model only, so this is Dart-driven — it enumerates image assets
+  /// (newest first) and scans them sequentially, streaming combined
+  /// [ScanResult]s and progress on the returned [ScanSession] exactly like
+  /// [startScan].
+  ///
+  /// Cost scales with the model count × library size — ensemble is for
+  /// accuracy, not speed. Classifier-only: a detector model id in [strategy]
+  /// throws (per-asset) once its detection result surfaces.
+  ///
+  /// Honours [config.confidenceThreshold] / [config.region] and the Dart-side
+  /// `includeOnlyAssetIds` / `skipAssetIds` filters. [config.modelId] is
+  /// ignored — the strategy's models drive classification.
+  Future<ScanSession> startScanEnsemble(
+    EnsembleStrategy strategy, {
+    ScanConfiguration config = const ScanConfiguration(),
+  }) {
+    emitTelemetry(TelemetryEvent.scanStarted(modelId: strategy.modelIds.first));
+    return ScanSession.startEnsemble(
+      config: config,
+      platform: _platform,
+      listAssetIds: () => _platform.listAssetIdentifiers(mediaType: 'image'),
+      scanAsset: (localId) => scanAssetEnsemble(
+        localId,
+        strategy,
+        confidenceThreshold: config.confidenceThreshold,
+        region: config.region,
+      ),
       telemetrySink: emitTelemetry,
       includeLocalIds: includeLocalIdsInTelemetry,
       decisionLookup: lookupDecision,
@@ -679,6 +733,80 @@ class NsfwDetector {
     );
     return result;
   }
+
+  /// Loads a downscaled JPEG thumbnail for the photo-library asset identified
+  /// by [localIdentifier] — handy for rendering a preview next to a
+  /// [ScanResult] without pulling in a separate photo-library package.
+  ///
+  /// Returns `null` when the asset can't be resolved or decoded (e.g. it was
+  /// deleted, or lives in iCloud and is unavailable offline). [maxWidth] /
+  /// [maxHeight] bound the result in logical pixels; aspect ratio is preserved.
+  Future<Uint8List?> loadThumbnail(
+    String localIdentifier, {
+    int maxWidth = 256,
+    int maxHeight = 256,
+  }) =>
+      _platform.loadThumbnail(
+        localIdentifier,
+        maxWidth: maxWidth,
+        maxHeight: maxHeight,
+      );
+
+  // ── Asset management ────────────────────────────────────────────────────────
+  // Native operations on the *original* photo-library asset (PhotoKit). All
+  // require `.readWrite` permission — already covered by [requestPermission].
+  // These mutate the user's real library; surface confirmation in the UI.
+
+  /// Marks the asset identified by [localIdentifier] as favorite (or clears it).
+  /// Reversible, no system prompt — mirrors the heart toggle in Photos.
+  Future<void> setAssetFavorite(String localIdentifier, {required bool favorite}) =>
+      _platform.setAssetFavorite(localIdentifier, favorite);
+
+  /// Hides (or un-hides) the asset. On iOS the asset moves to the (possibly
+  /// Face-ID-locked) "Hidden" album and stops appearing in normal fetches.
+  Future<void> setAssetHidden(String localIdentifier, {required bool hidden}) =>
+      _platform.setAssetHidden(localIdentifier, hidden);
+
+  /// Deletes [localIdentifiers] from the photo library. iOS shows its **own**
+  /// confirmation dialog and routes the items to "Recently Deleted" (30-day
+  /// grace) — this cannot be bypassed. Returns `true` when the user confirmed,
+  /// `false` when they cancelled the dialog.
+  Future<bool> deleteAssets(List<String> localIdentifiers) =>
+      _platform.deleteAssets(localIdentifiers);
+
+  /// Lists the user's albums (editable `PHAssetCollection`s) for an album
+  /// picker. Smart/system albums are excluded — they reject membership changes.
+  Future<List<PhotoAlbum>> listAlbums() async {
+    final maps = await _platform.listAlbums();
+    return maps.map(PhotoAlbum.fromMap).toList();
+  }
+
+  /// Creates a new album named [title] and returns its identifier — pass it to
+  /// [addAssetsToAlbum] / [moveAssetsToAlbum].
+  Future<String> createAlbum(String title) => _platform.createAlbum(title);
+
+  /// Adds [localIdentifiers] to the album [albumId]. An asset may belong to
+  /// several albums at once (iOS albums are membership sets, not folders).
+  Future<void> addAssetsToAlbum(List<String> localIdentifiers, String albumId) =>
+      _platform.addAssetsToAlbum(localIdentifiers, albumId);
+
+  /// Removes [localIdentifiers] from the album [albumId]. The assets stay in
+  /// the library and any other albums they belong to.
+  Future<void> removeAssetsFromAlbum(
+          List<String> localIdentifiers, String albumId) =>
+      _platform.removeAssetsFromAlbum(localIdentifiers, albumId);
+
+  /// "Moves" [localIdentifiers] into [toAlbumId]: adds them there and, when
+  /// [fromAlbumId] is a user album, removes them from it. Because iOS albums are
+  /// membership sets, a true folder-move doesn't exist — assets always remain in
+  /// "Recents". Smart albums passed as [fromAlbumId] are left untouched.
+  Future<void> moveAssetsToAlbum(
+    List<String> localIdentifiers,
+    String toAlbumId, {
+    String? fromAlbumId,
+  }) =>
+      _platform.moveAssetsToAlbum(localIdentifiers, toAlbumId,
+          fromAlbumId: fromAlbumId);
 
   /// Shows the native photo/video picker, then scans the selected items.
   /// [maxItems] — max selectable items (0 = unlimited). Default: 1.

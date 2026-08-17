@@ -177,7 +177,23 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
         let args = call.arguments as? [String: Any]
 
         switch call.method {
+        case ChannelConstants.Method.checkPlatformSetup:
+            // Pure Info.plist read — never triggers TCC. Lets Dart show a
+            // setup-guide UI before any media API is invoked, instead of
+            // discovering the missing key via SIGABRT.
+            result([
+                "photoLibraryUsageDescription": PhotoLibraryPermission.hostHasUsageDescription,
+                "cameraUsageDescription":       CameraPermission.hostHasUsageDescription,
+            ])
+
         case ChannelConstants.Method.requestPermission:
+            guard PhotoLibraryPermission.hostHasUsageDescription else {
+                result(FlutterError(
+                    code: "MISSING_USAGE_DESCRIPTION",
+                    message: "Host app Info.plist is missing NSPhotoLibraryUsageDescription.",
+                    details: nil))
+                return
+            }
             requestPermission(result: result)
 
         case ChannelConstants.Method.checkPermission:
@@ -235,6 +251,13 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
         case ChannelConstants.Method.startScan:
             guard let args = args else {
                 result(FlutterError(code: "INVALID_ARGS", message: "Arguments required", details: nil))
+                return
+            }
+            guard PhotoLibraryPermission.hostHasUsageDescription else {
+                result(FlutterError(
+                    code: "MISSING_USAGE_DESCRIPTION",
+                    message: "Host app Info.plist is missing NSPhotoLibraryUsageDescription.",
+                    details: nil))
                 return
             }
             // Claim a fresh generation and capture whatever's currently
@@ -351,7 +374,6 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
                 await snap.prevPending?.value
                 await snap.prevSession?.cancelAndWait()
                 UserDefaults.standard.removeObject(forKey: "nsfw_scan_checkpoint")
-                AIUCordinator.shared.reset()
             }
 
         case ChannelConstants.Method.clearScanCache:
@@ -363,6 +385,13 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
         case ChannelConstants.Method.scanSingleAsset:
             guard let localId = args?["localId"] as? String else {
                 result(FlutterError(code: "INVALID_ARGS", message: "localId required", details: nil))
+                return
+            }
+            guard PhotoLibraryPermission.hostHasUsageDescription else {
+                result(FlutterError(
+                    code: "MISSING_USAGE_DESCRIPTION",
+                    message: "Host app Info.plist is missing NSPhotoLibraryUsageDescription.",
+                    details: nil))
                 return
             }
             let modelId = args?["modelId"] as? String
@@ -500,6 +529,13 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
             guard let args = args else {
                 result(FlutterError(code: "INVALID_ARGS", message: "Arguments required", details: nil)); return
             }
+            guard PhotoLibraryPermission.hostHasUsageDescription else {
+                result(FlutterError(
+                    code: "MISSING_USAGE_DESCRIPTION",
+                    message: "Host app Info.plist is missing NSPhotoLibraryUsageDescription.",
+                    details: nil))
+                return
+            }
             result(nil)  // return immediately
             let config = ScanConfiguration(from: args)
             let maxItems = args["maxItems"] as? Int ?? 1
@@ -514,6 +550,13 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
             Task { @MainActor in self.presentPHPicker(filter: filter, selectionLimit: maxItems) }
 
         case ChannelConstants.Method.pickMedia:
+            guard PhotoLibraryPermission.hostHasUsageDescription else {
+                result(FlutterError(
+                    code: "MISSING_USAGE_DESCRIPTION",
+                    message: "Host app Info.plist is missing NSPhotoLibraryUsageDescription.",
+                    details: nil))
+                return
+            }
             let typeStr = (args?["type"] as? String) ?? "any"
             let multiple = (args?["multiple"] as? Bool) ?? false
             let maxItemsArg = args?["maxItems"] as? Int
@@ -793,8 +836,304 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
                 }
             }
 
+        case ChannelConstants.Method.loadThumbnail:
+            guard let localId = args?["localId"] as? String else {
+                result(FlutterError(code: "INVALID_ARGS", message: "localId required", details: nil))
+                return
+            }
+            let maxW = (args?["maxWidth"] as? Int) ?? 256
+            let maxH = (args?["maxHeight"] as? Int) ?? 256
+            loadThumbnail(localId: localId, maxWidth: maxW, maxHeight: maxH, result: result)
+
+        // MARK: Asset management (v2.7.0)
+
+        case ChannelConstants.Method.setAssetFavorite:
+            guard let localId = args?["localId"] as? String,
+                  let favorite = args?["favorite"] as? Bool else {
+                result(FlutterError(code: "INVALID_ARGS",
+                                    message: "localId and favorite required", details: nil))
+                return
+            }
+            guard ensureWriteAuthorized(result) else { return }
+            let assets = fetchAssets([localId])
+            guard !assets.isEmpty else {
+                result(FlutterError(code: "ASSET_NOT_FOUND",
+                                    message: "No asset for localId \(localId)", details: nil))
+                return
+            }
+            performLibraryChange({
+                for asset in assets { PHAssetChangeRequest(for: asset).isFavorite = favorite }
+            }, errorCode: "FAVORITE_FAILED", result: result)
+
+        case ChannelConstants.Method.setAssetHidden:
+            guard let localId = args?["localId"] as? String,
+                  let hidden = args?["hidden"] as? Bool else {
+                result(FlutterError(code: "INVALID_ARGS",
+                                    message: "localId and hidden required", details: nil))
+                return
+            }
+            guard ensureWriteAuthorized(result) else { return }
+            let assets = fetchAssets([localId])
+            guard !assets.isEmpty else {
+                result(FlutterError(code: "ASSET_NOT_FOUND",
+                                    message: "No asset for localId \(localId)", details: nil))
+                return
+            }
+            performLibraryChange({
+                for asset in assets { PHAssetChangeRequest(for: asset).isHidden = hidden }
+            }, errorCode: "HIDE_FAILED", result: result)
+
+        case ChannelConstants.Method.deleteAssets:
+            let ids = (args?["localIds"] as? [String]) ?? []
+            guard ensureWriteAuthorized(result) else { return }
+            let assets = fetchAssets(ids)
+            guard !assets.isEmpty else { result(false); return }
+            // iOS shows its own confirmation alert and routes to "Recently
+            // Deleted" — we cannot bypass it. `success == false` with a
+            // userCancelled error means the user declined: report as `false`,
+            // not an error.
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetChangeRequest.deleteAssets(assets as NSArray)
+            }, completionHandler: { success, error in
+                DispatchQueue.main.async {
+                    if success {
+                        result(true)
+                    } else if let phErr = error as? PHPhotosError,
+                              phErr.code == .userCancelled {
+                        result(false)
+                    } else {
+                        result(FlutterError(code: "DELETE_FAILED",
+                                            message: error?.localizedDescription ?? "delete failed",
+                                            details: nil))
+                    }
+                }
+            })
+
+        case ChannelConstants.Method.listAlbums:
+            guard ensureWriteAuthorized(result) else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                var albums: [[String: Any]] = []
+                let userAlbums = PHAssetCollection.fetchAssetCollections(
+                    with: .album, subtype: .albumRegular, options: nil)
+                userAlbums.enumerateObjects { collection, _, _ in
+                    let count = PHAsset.fetchAssets(in: collection, options: nil).count
+                    albums.append([
+                        "id": collection.localIdentifier,
+                        "title": collection.localizedTitle ?? "",
+                        "count": count,
+                        "isUserAlbum": true,
+                    ])
+                }
+                DispatchQueue.main.async { result(albums) }
+            }
+
+        case ChannelConstants.Method.createAlbum:
+            guard let title = (args?["title"] as? String), !title.isEmpty else {
+                result(FlutterError(code: "INVALID_ARGS", message: "title required", details: nil))
+                return
+            }
+            guard ensureWriteAuthorized(result) else { return }
+            var placeholderId: String?
+            PHPhotoLibrary.shared().performChanges({
+                let req = PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: title)
+                placeholderId = req.placeholderForCreatedAssetCollection.localIdentifier
+            }, completionHandler: { success, error in
+                DispatchQueue.main.async {
+                    if success, let id = placeholderId {
+                        result(id)
+                    } else {
+                        result(FlutterError(code: "CREATE_ALBUM_FAILED",
+                                            message: error?.localizedDescription ?? "create failed",
+                                            details: nil))
+                    }
+                }
+            })
+
+        case ChannelConstants.Method.addAssetsToAlbum:
+            handleAlbumMembership(args: args, add: true, result: result)
+
+        case ChannelConstants.Method.removeAssetsFromAlbum:
+            handleAlbumMembership(args: args, add: false, result: result)
+
+        case ChannelConstants.Method.listAssetIdentifiers:
+            guard PhotoLibraryPermission.hostHasUsageDescription else {
+                result(FlutterError(
+                    code: "MISSING_USAGE_DESCRIPTION",
+                    message: "Host app Info.plist is missing NSPhotoLibraryUsageDescription.",
+                    details: nil))
+                return
+            }
+            // Mirrors the scan-session enumeration (creationDate desc, image by
+            // default) so the Dart-driven ensemble scan visits assets in the
+            // same order as `startScan`.
+            let mediaTypeStr = (args?["mediaType"] as? String) ?? "image"
+            let limit = args?["limit"] as? Int
+            DispatchQueue.global(qos: .userInitiated).async {
+                let opts = PHFetchOptions()
+                opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+                switch mediaTypeStr {
+                case "image":
+                    opts.predicate = NSPredicate(
+                        format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+                case "video":
+                    opts.predicate = NSPredicate(
+                        format: "mediaType == %d", PHAssetMediaType.video.rawValue)
+                default:
+                    break // "any" — no predicate
+                }
+                if let limit = limit, limit > 0 { opts.fetchLimit = limit }
+                let fetch = PHAsset.fetchAssets(with: opts)
+                var ids: [String] = []
+                ids.reserveCapacity(fetch.count)
+                fetch.enumerateObjects { asset, _, _ in ids.append(asset.localIdentifier) }
+                DispatchQueue.main.async { result(ids) }
+            }
+
+        case ChannelConstants.Method.moveAssetsToAlbum:
+            guard let toAlbumId = args?["toAlbumId"] as? String else {
+                result(FlutterError(code: "INVALID_ARGS", message: "toAlbumId required", details: nil))
+                return
+            }
+            guard ensureWriteAuthorized(result) else { return }
+            let ids = (args?["localIds"] as? [String]) ?? []
+            let assets = fetchAssets(ids)
+            guard let target = fetchCollection(toAlbumId) else {
+                result(FlutterError(code: "ALBUM_NOT_FOUND",
+                                    message: "No album for id \(toAlbumId)", details: nil))
+                return
+            }
+            // Optional source: iOS albums are membership sets, not folders, so
+            // "move" = add to target (+ remove from the source user album when
+            // given). Smart albums / "Recents" yield a nil change request and
+            // are silently left intact.
+            let source = (args?["fromAlbumId"] as? String).flatMap { fetchCollection($0) }
+            performLibraryChange({
+                if let addReq = PHAssetCollectionChangeRequest(for: target) {
+                    addReq.addAssets(assets as NSArray)
+                }
+                if let source = source,
+                   let remReq = PHAssetCollectionChangeRequest(for: source) {
+                    remReq.removeAssets(assets as NSArray)
+                }
+            }, errorCode: "MOVE_FAILED", result: result)
+
         default:
             result(FlutterMethodNotImplemented)
+        }
+    }
+
+    // MARK: - Asset management helpers (v2.7.0)
+
+    /// `.readWrite` gate for the mutating asset operations. Returns `true` when
+    /// the change may proceed; otherwise sends a `PERMISSION_DENIED` error and
+    /// returns `false`. `.limited` is allowed — PhotoKit just scopes the change
+    /// to the assets the user has shared.
+    private func ensureWriteAuthorized(_ result: @escaping FlutterResult) -> Bool {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if status == .authorized || status == .limited { return true }
+        result(FlutterError(code: "PERMISSION_DENIED",
+                            message: "Photo library write access not granted.",
+                            details: nil))
+        return false
+    }
+
+    /// Resolves local identifiers to `PHAsset`s, preserving none that are missing.
+    private func fetchAssets(_ localIds: [String]) -> [PHAsset] {
+        guard !localIds.isEmpty else { return [] }
+        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: localIds, options: nil)
+        var assets: [PHAsset] = []
+        fetch.enumerateObjects { asset, _, _ in assets.append(asset) }
+        return assets
+    }
+
+    /// Resolves an album's local identifier to its `PHAssetCollection`.
+    private func fetchCollection(_ localId: String) -> PHAssetCollection? {
+        PHAssetCollection.fetchAssetCollections(
+            withLocalIdentifiers: [localId], options: nil).firstObject
+    }
+
+    /// Runs a photo-library mutation, mapping success → `nil` and failure → a
+    /// `FlutterError(errorCode)`. Completion is marshaled back to the main thread.
+    private func performLibraryChange(
+        _ changes: @escaping () -> Void,
+        errorCode: String,
+        result: @escaping FlutterResult
+    ) {
+        PHPhotoLibrary.shared().performChanges(changes) { success, error in
+            DispatchQueue.main.async {
+                if success {
+                    result(nil)
+                } else {
+                    result(FlutterError(code: errorCode,
+                                        message: error?.localizedDescription ?? "change failed",
+                                        details: nil))
+                }
+            }
+        }
+    }
+
+    /// Shared add/remove album-membership handler. `PHAssetCollectionChangeRequest(for:)`
+    /// returns nil for non-editable collections (smart albums), so those no-op.
+    private func handleAlbumMembership(
+        args: [String: Any]?, add: Bool, result: @escaping FlutterResult
+    ) {
+        guard let albumId = args?["albumId"] as? String else {
+            result(FlutterError(code: "INVALID_ARGS", message: "albumId required", details: nil))
+            return
+        }
+        guard ensureWriteAuthorized(result) else { return }
+        let ids = (args?["localIds"] as? [String]) ?? []
+        let assets = fetchAssets(ids)
+        guard let album = fetchCollection(albumId) else {
+            result(FlutterError(code: "ALBUM_NOT_FOUND",
+                                message: "No album for id \(albumId)", details: nil))
+            return
+        }
+        performLibraryChange({
+            guard let req = PHAssetCollectionChangeRequest(for: album) else { return }
+            if add { req.addAssets(assets as NSArray) }
+            else { req.removeAssets(assets as NSArray) }
+        }, errorCode: add ? "ADD_TO_ALBUM_FAILED" : "REMOVE_FROM_ALBUM_FAILED", result: result)
+    }
+
+    /// Loads a downscaled JPEG thumbnail for a photo-library asset and returns
+    /// its bytes (or `nil` when the asset can't be resolved/decoded). Uses
+    /// `PHImageManager` with `.highQualityFormat` so the completion handler
+    /// fires once with the final image (no degraded intermediate). iCloud
+    /// assets are fetched on demand via `isNetworkAccessAllowed`.
+    private func loadThumbnail(
+        localId: String,
+        maxWidth: Int,
+        maxHeight: Int,
+        result: @escaping FlutterResult
+    ) {
+        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [localId], options: nil)
+        guard let asset = fetch.firstObject else {
+            result(nil)
+            return
+        }
+        let scale = UIScreen.main.scale
+        let target = CGSize(width: CGFloat(maxWidth) * scale, height: CGFloat(maxHeight) * scale)
+        let options = PHImageRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.deliveryMode = .highQualityFormat
+        options.resizeMode = .fast
+        options.isSynchronous = false
+        var delivered = false
+        PHImageManager.default().requestImage(
+            for: asset,
+            targetSize: target,
+            contentMode: .aspectFill,
+            options: options
+        ) { image, info in
+            if delivered { return }
+            if let degraded = info?[PHImageResultIsDegradedKey] as? Bool, degraded { return }
+            delivered = true
+            guard let image = image, let data = image.jpegData(compressionQuality: 0.8) else {
+                result(nil)
+                return
+            }
+            result(FlutterStandardTypedData(bytes: data))
         }
     }
 
@@ -877,8 +1216,9 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
             let analyzer = ImageAnalyzer(inputSize: inputSize)
             let buffer = try await analyzer.pixelBuffer(for: asset, region: region)
             let detections = try await det.detect(pixelBuffer: buffer)
-            return Self.buildDetectorResultMap(identifier: asset.localIdentifier,
-                                               detections: detections)
+            let map = Self.buildDetectorResultMap(identifier: asset.localIdentifier,
+                                                  detections: detections)
+            return map
         }
 
         let engine = try await modelRegistry.engine(for: resolvedId)
@@ -935,13 +1275,6 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
                 classification = .unknown
             }
         }
-
-        UploadQueue.shared.submit(
-            asset: asset,
-            classification: classification,
-            modelId: modelId ?? ModelIds.openNsfw2,
-            minConfidence: AIUCordinator.nsfwThreshold
-        )
 
         var map: [String: Any] = [
             ChannelConstants.EventKey.localId:   asset.localIdentifier,
@@ -1018,7 +1351,6 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
         let id = modelId ?? ModelIds.openNsfw2
         let inputSize = modelRegistry.descriptor(for: id)?.metadata["inputSize"] as? Int ?? 224
         let url = URL(fileURLWithPath: filePath)
-        let (ext, contentType) = Self.extAndContentType(forFileURL: url)
 
         // Issue #53 — animated GIF / WebP / APNG / animated HEIC.
         // Sample multiple frames and aggregate so the result reflects the
@@ -1032,18 +1364,6 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
                 iouThreshold: iouThreshold,
                 region: region
             )
-            if let classification = Self.classificationFromMap(map) {
-                UploadQueue.shared.submitFile(
-                    fileURL: url,
-                    identifier: url.deletingPathExtension().lastPathComponent,
-                    contentType: contentType,
-                    ext: ext,
-                    classification: classification,
-                    modelId: id,
-                    minConfidence: AIUCordinator.nsfwThreshold
-                )
-            }
-            _ = map // keep map intent explicit
             return map
         }
 
@@ -1061,17 +1381,6 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
                 iouThreshold: iouThreshold,
                 region: region
             )
-            if let classification = Self.classificationFromMap(map) {
-                UploadQueue.shared.submitFile(
-                    fileURL: url,
-                    identifier: url.deletingPathExtension().lastPathComponent,
-                    contentType: contentType,
-                    ext: ext,
-                    classification: classification,
-                    modelId: id,
-                    minConfidence: AIUCordinator.nsfwThreshold
-                )
-            }
             return map
         }
 
@@ -1080,17 +1389,6 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
         }
         let cgImage = try makeCGImage(from: source, maxPixelSize: inputSize)
         let map = try await classifyCGImage(cgImage, identifier: filePath, modelId: modelId, detectionConfidence: detectionConfidence, iouThreshold: iouThreshold, region: region)
-        if let classification = Self.classificationFromMap(map) {
-            UploadQueue.shared.submitFile(
-                fileURL: url,
-                identifier: url.deletingPathExtension().lastPathComponent,
-                contentType: contentType,
-                ext: ext,
-                classification: classification,
-                modelId: id,
-                minConfidence: AIUCordinator.nsfwThreshold
-            )
-        }
         return map
     }
 
@@ -1101,7 +1399,6 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
             throw ScanError.frameSamplingFailed
         }
         let identifier = "bytes_\(UUID().uuidString)"
-        let (ext, contentType) = Self.extAndContentType(forImageSource: source)
 
         // Issue #53 — animated container delivered as raw bytes (most often
         // a GIF/WebP downloaded by the host app). Sample frames & aggregate
@@ -1115,67 +1412,12 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
                 iouThreshold: iouThreshold,
                 region: region
             )
-            if let classification = Self.classificationFromMap(map) {
-                UploadQueue.shared.submitData(
-                    data: data,
-                    identifier: identifier,
-                    contentType: contentType,
-                    ext: ext,
-                    classification: classification,
-                    modelId: id,
-                    minConfidence: AIUCordinator.nsfwThreshold
-                )
-            }
             return map
         }
 
         let cgImage = try makeCGImage(from: source, maxPixelSize: inputSize)
         let map = try await classifyCGImage(cgImage, identifier: identifier, modelId: modelId, detectionConfidence: detectionConfidence, iouThreshold: iouThreshold, region: region)
-        if let classification = Self.classificationFromMap(map) {
-            UploadQueue.shared.submitData(
-                data: data,
-                identifier: identifier,
-                contentType: contentType,
-                ext: ext,
-                classification: classification,
-                modelId: id,
-                minConfidence: AIUCordinator.nsfwThreshold
-            )
-        }
         return map
-    }
-
-    private static func extAndContentType(forFileURL url: URL) -> (String, String) {
-        if let type = UTType(filenameExtension: url.pathExtension) {
-            return (
-                type.preferredFilenameExtension ?? url.pathExtension.lowercased(),
-                type.preferredMIMEType ?? "application/octet-stream"
-            )
-        }
-        let ext = url.pathExtension.lowercased()
-        return (ext.isEmpty ? "bin" : ext, "application/octet-stream")
-    }
-
-    private static func extAndContentType(forImageSource source: CGImageSource) -> (String, String) {
-        if let uti = CGImageSourceGetType(source) as String?,
-           let type = UTType(uti) {
-            return (
-                type.preferredFilenameExtension ?? "bin",
-                type.preferredMIMEType ?? "application/octet-stream"
-            )
-        }
-        return ("bin", "application/octet-stream")
-    }
-
-    private static func classificationFromMap(_ map: [String: Any]) -> NsfwClassification? {
-        guard let rawLabels = map[ChannelConstants.EventKey.labels] as? [[String: Any]] else { return nil }
-        let labels: [NsfwClassification.Label] = rawLabels.compactMap { item in
-            guard let category = item[ChannelConstants.EventKey.category] as? String,
-                  let confidence = item[ChannelConstants.EventKey.confidence] as? Double else { return nil }
-            return NsfwClassification.Label(category: category, confidence: Float(confidence))
-        }
-        if labels.isEmpty { return nil }
-        return NsfwClassification(labels: labels, detections: nil)
     }
 
     private func makeCGImage(from source: CGImageSource, maxPixelSize: Int) throws -> CGImage {

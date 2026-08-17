@@ -32,6 +32,23 @@ class NsfwMethodChannel extends NsfwPlatformInterface {
   }
 
   @override
+  Future<PlatformSetupReport> checkPlatformSetup() async {
+    try {
+      final map =
+          await _methodChannel.invokeMapMethod<dynamic, dynamic>(
+        'checkPlatformSetup',
+      );
+      return map == null
+          ? const PlatformSetupReport.allOk()
+          : PlatformSetupReport.fromMap(map);
+    } on MissingPluginException {
+      // Older native side (pre-2.6.3) — assume ok so apps that target
+      // both pluginversions don't show spurious setup hints.
+      return const PlatformSetupReport.allOk();
+    }
+  }
+
+  @override
   Future<List<ModelDescriptor>> availableModels() async {
     final result =
         await _methodChannel.invokeListMethod<Map>('availableModels');
@@ -250,6 +267,110 @@ class NsfwMethodChannel extends NsfwPlatformInterface {
     } on MissingPluginException {
       // No-op: platforms without a warm-cache impl just skip prefetching.
     }
+  }
+
+  @override
+  Future<Uint8List?> loadThumbnail(
+    String localIdentifier, {
+    int maxWidth = 256,
+    int maxHeight = 256,
+  }) async {
+    return _methodChannel.invokeMethod<Uint8List>(
+      'loadThumbnail',
+      {
+        'localId': localIdentifier,
+        'maxWidth': maxWidth,
+        'maxHeight': maxHeight,
+      },
+    );
+  }
+
+  @override
+  Future<List<String>> listAssetIdentifiers({
+    String mediaType = 'image',
+    int? limit,
+  }) async {
+    final result = await _methodChannel.invokeListMethod<String>(
+      'listAssetIdentifiers',
+      {
+        'mediaType': mediaType,
+        if (limit != null) 'limit': limit,
+      },
+    );
+    return result ?? const [];
+  }
+
+  @override
+  Future<void> setAssetFavorite(String localIdentifier, bool favorite) async {
+    await _methodChannel.invokeMethod<void>('setAssetFavorite', {
+      'localId': localIdentifier,
+      'favorite': favorite,
+    });
+  }
+
+  @override
+  Future<void> setAssetHidden(String localIdentifier, bool hidden) async {
+    await _methodChannel.invokeMethod<void>('setAssetHidden', {
+      'localId': localIdentifier,
+      'hidden': hidden,
+    });
+  }
+
+  @override
+  Future<bool> deleteAssets(List<String> localIdentifiers) async {
+    final confirmed = await _methodChannel.invokeMethod<bool>('deleteAssets', {
+      'localIds': localIdentifiers,
+    });
+    return confirmed ?? false;
+  }
+
+  @override
+  Future<List<Map<dynamic, dynamic>>> listAlbums() async {
+    final result =
+        await _methodChannel.invokeListMethod<Map<dynamic, dynamic>>('listAlbums');
+    return result ?? const [];
+  }
+
+  @override
+  Future<String> createAlbum(String title) async {
+    final id = await _methodChannel.invokeMethod<String>('createAlbum', {
+      'title': title,
+    });
+    if (id == null || id.isEmpty) {
+      throw StateError('createAlbum returned no album identifier');
+    }
+    return id;
+  }
+
+  @override
+  Future<void> addAssetsToAlbum(
+      List<String> localIdentifiers, String albumId) async {
+    await _methodChannel.invokeMethod<void>('addAssetsToAlbum', {
+      'localIds': localIdentifiers,
+      'albumId': albumId,
+    });
+  }
+
+  @override
+  Future<void> removeAssetsFromAlbum(
+      List<String> localIdentifiers, String albumId) async {
+    await _methodChannel.invokeMethod<void>('removeAssetsFromAlbum', {
+      'localIds': localIdentifiers,
+      'albumId': albumId,
+    });
+  }
+
+  @override
+  Future<void> moveAssetsToAlbum(
+    List<String> localIdentifiers,
+    String toAlbumId, {
+    String? fromAlbumId,
+  }) async {
+    await _methodChannel.invokeMethod<void>('moveAssetsToAlbum', {
+      'localIds': localIdentifiers,
+      'toAlbumId': toAlbumId,
+      if (fromAlbumId != null) 'fromAlbumId': fromAlbumId,
+    });
   }
 
   @override

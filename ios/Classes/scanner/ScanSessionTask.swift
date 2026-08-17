@@ -338,12 +338,6 @@ final class ScanSessionTask: @unchecked Sendable {
                             modificationDateMs: cachedMod) {
                             let labels = Self.decodeLabels(rec.labelsJson)
                             let cls = NsfwClassification(labels: labels)
-                            UploadQueue.shared.submit(
-                                asset: asset,
-                                classification: cls,
-                                modelId: self.config.modelId,
-                                minConfidence: Float(self.config.confidenceThreshold)
-                            )
                             if self.config.replayCachedResults {
                                 var map = eventSink.buildResultMap(
                                     asset: asset, classification: cls)
@@ -413,12 +407,6 @@ final class ScanSessionTask: @unchecked Sendable {
                                 )
                                 batcher.recordResult(self.eventSink.buildResultMap(
                                     asset: asset, classification: classification))
-                                UploadQueue.shared.submit(
-                                    asset: asset,
-                                    classification: classification,
-                                    modelId: self.config.modelId,
-                                    minConfidence: Float(self.config.confidenceThreshold)
-                                )
                                 checkpoint.record(asset.localIdentifier)
                                 ScanCache.shared.record(
                                     localIdentifier: asset.localIdentifier,
@@ -566,12 +554,6 @@ final class ScanSessionTask: @unchecked Sendable {
             let classification = classifications[i]
             batcher.recordResult(eventSink.buildResultMap(
                 asset: pair.asset, classification: classification))
-            UploadQueue.shared.submit(
-                asset: pair.asset,
-                classification: classification,
-                modelId: self.config.modelId,
-                minConfidence: Float(self.config.confidenceThreshold)
-            )
             checkpoint.record(pair.asset.localIdentifier)
             ScanCache.shared.record(
                 localIdentifier: pair.asset.localIdentifier,
@@ -626,7 +608,7 @@ final class ScanSessionTask: @unchecked Sendable {
     /// progress / cache / event-batcher plumbing but routes pixel buffers
     /// through `MLDetectorEngine.detect(...)` and converts the boxes into a
     /// classifier-shaped `NsfwClassification` so the rest of the pipeline
-    /// (UploadQueue, EventBatcher, ScanCache) keeps working unchanged.
+    /// (EventBatcher, ScanCache) keeps working unchanged.
     ///
     /// Videos are not supported in detection mode in Phase B — we run the
     /// detector on the first sampled frame and report that. (The hard-coded
@@ -703,12 +685,6 @@ final class ScanSessionTask: @unchecked Sendable {
                         let labels = Self.decodeLabels(rec.labelsJson)
                         let detections = Self.decodeDetections(rec.detectionsJson)
                         let cls = NsfwClassification(labels: labels, detections: detections)
-                        UploadQueue.shared.submit(
-                            asset: asset,
-                            classification: cls,
-                            modelId: self.config.modelId,
-                            minConfidence: Float(self.config.confidenceThreshold)
-                        )
                         if config.replayCachedResults {
                             var map = eventSink.buildResultMap(asset: asset, classification: cls)
                             map["fromCache"] = true
@@ -762,12 +738,6 @@ final class ScanSessionTask: @unchecked Sendable {
                         let scannedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
                         batcher.recordResult(self.eventSink.buildResultMap(
                             asset: asset, classification: cls))
-                        UploadQueue.shared.submit(
-                            asset: asset,
-                            classification: cls,
-                            modelId: self.config.modelId,
-                            minConfidence: Float(self.config.confidenceThreshold)
-                        )
                         checkpoint.record(asset.localIdentifier)
                         ScanCache.shared.record(
                             localIdentifier: asset.localIdentifier,

@@ -7,6 +7,7 @@ object ChannelConstants {
     object Method {
         const val REQUEST_PERMISSION = "requestPermission"
         const val CHECK_PERMISSION = "checkPermission"
+        const val CHECK_PLATFORM_SETUP = "checkPlatformSetup"
         const val AVAILABLE_MODELS = "availableModels"
         const val PRELOAD_MODEL = "preloadModel"
         const val START_SCAN = "startScan"
@@ -45,6 +46,7 @@ object ChannelConstants {
         const val PREFETCH_ASSETS   = "prefetchAssets"
         const val REDACT_BYTES      = "redactBytes"
         const val REDACT_FILE       = "redactFile"
+        const val LOAD_THUMBNAIL    = "loadThumbnail"
         const val SKIP_CURRENT_ASSET = "skipCurrentAsset"
         const val REGISTER_MODEL    = "registerModel"
         const val SCHEDULE_BACKGROUND_SWEEP = "scheduleBackgroundSweep"

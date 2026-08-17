@@ -9,6 +9,7 @@ enum ChannelConstants {
         static let checkPermission          = "checkPermission"
         static let checkCameraPermission    = "checkCameraPermission"
         static let requestCameraPermission  = "requestCameraPermission"
+        static let checkPlatformSetup       = "checkPlatformSetup"
         static let availableModels    = "availableModels"
         static let preloadModel       = "preloadModel"
         static let startScan          = "startScan"
@@ -37,10 +38,28 @@ enum ChannelConstants {
         static let prefetchAssets     = "prefetchAssets"
         static let redactBytes        = "redactBytes"
         static let redactFile         = "redactFile"
+        static let loadThumbnail      = "loadThumbnail"
         static let skipCurrentAsset   = "skipCurrentAsset"
         static let registerModel      = "registerModel"
         static let scheduleBackgroundSweep = "scheduleBackgroundSweep"
         static let cancelBackgroundSweep   = "cancelBackgroundSweep"
+
+        // v2.7.0 — native asset management (favorite / hide / delete / albums).
+        // All operate on the *original* PHAsset via the photo library; require
+        // `.readWrite` authorization (already requested by requestPermission).
+        static let setAssetFavorite     = "setAssetFavorite"
+        static let setAssetHidden       = "setAssetHidden"
+        static let deleteAssets         = "deleteAssets"
+        static let listAlbums           = "listAlbums"
+        static let createAlbum          = "createAlbum"
+        static let addAssetsToAlbum     = "addAssetsToAlbum"
+        static let removeAssetsFromAlbum = "removeAssetsFromAlbum"
+        static let moveAssetsToAlbum    = "moveAssetsToAlbum"
+
+        // v2.7.0 — enumerate library asset identifiers. Lets Dart drive a
+        // batch *ensemble* scan (run each asset through scanAssetEnsemble) —
+        // the native session path is single-model only.
+        static let listAssetIdentifiers = "listAssetIdentifiers"
     }
 
     enum EventKey {

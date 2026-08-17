@@ -6,6 +6,64 @@ import '../api/permissions/permission_kind.dart';
 import '../api/scan_configuration.dart';
 import '../l10n/nsfw_localizations.dart';
 
+/// Snapshot of host-app platform setup. Returned by
+/// `NsfwDetector.instance.checkPlatformSetup()` so apps can verify their
+/// `Info.plist` (iOS) / `AndroidManifest.xml` declarations are in place
+/// *before* invoking any media API — the alternative on iOS is SIGABRT the
+/// first time the OS sees a missing `NSPhotoLibraryUsageDescription`.
+///
+/// Each field is `true` when the corresponding usage description / manifest
+/// permission is declared by the host app, `false` when it is missing.
+class PlatformSetupReport {
+  const PlatformSetupReport({
+    required this.photoLibraryUsageDescription,
+    required this.cameraUsageDescription,
+  });
+
+  /// All-ok constant. Used as the default-implementation return value so
+  /// platforms / test mocks that don't override `checkPlatformSetup` don't
+  /// surface false negatives.
+  const PlatformSetupReport.allOk()
+      : photoLibraryUsageDescription = true,
+        cameraUsageDescription = true;
+
+  /// iOS: `NSPhotoLibraryUsageDescription` present in `Info.plist`.
+  /// Android: `READ_MEDIA_IMAGES`/`READ_MEDIA_VIDEO` (API 33+) or
+  /// `READ_EXTERNAL_STORAGE` (API ≤ 32) declared in the manifest.
+  final bool photoLibraryUsageDescription;
+
+  /// iOS: `NSCameraUsageDescription` present in `Info.plist`.
+  /// Android: `CAMERA` declared in the manifest.
+  final bool cameraUsageDescription;
+
+  /// `true` when every checked key is present. Apps can short-circuit on
+  /// this in production and only inspect individual fields when surfacing
+  /// a setup-guide UI in development builds.
+  bool get isComplete =>
+      photoLibraryUsageDescription && cameraUsageDescription;
+
+  /// The keys whose declarations are missing on the host app. Empty when
+  /// `isComplete` is `true`. Useful for building "add these to Info.plist"
+  /// hint UIs.
+  List<String> get missingKeys => [
+        if (!photoLibraryUsageDescription) 'NSPhotoLibraryUsageDescription',
+        if (!cameraUsageDescription) 'NSCameraUsageDescription',
+      ];
+
+  factory PlatformSetupReport.fromMap(Map<dynamic, dynamic> map) =>
+      PlatformSetupReport(
+        photoLibraryUsageDescription:
+            map['photoLibraryUsageDescription'] as bool? ?? true,
+        cameraUsageDescription:
+            map['cameraUsageDescription'] as bool? ?? true,
+      );
+
+  @override
+  String toString() =>
+      'PlatformSetupReport(photo: $photoLibraryUsageDescription, '
+      'camera: $cameraUsageDescription)';
+}
+
 enum PhotoLibraryPermissionStatus {
   authorized,
   limited,
@@ -84,6 +142,13 @@ abstract class NsfwPlatformInterface extends PlatformInterface {
   // Permission
   Future<PhotoLibraryPermissionStatus> requestPermission();
   Future<PhotoLibraryPermissionStatus> checkPermission();
+
+  // Platform-setup preflight. Default returns "ok" so platforms / mocks that
+  // haven't wired it up don't surface false negatives. Real native impls
+  // override to read Info.plist (iOS) or PackageInfo.requestedPermissions
+  // (Android) without triggering the OS permission layer.
+  Future<PlatformSetupReport> checkPlatformSetup() async =>
+      const PlatformSetupReport.allOk();
 
   // Models — listing is critical because Dart needs to know what's available.
   Future<List<ModelDescriptor>> availableModels();
@@ -215,6 +280,80 @@ abstract class NsfwPlatformInterface extends PlatformInterface {
     String? modelId,
   }) async {}
 
+  /// Load a downscaled thumbnail (JPEG bytes) for the photo-library asset
+  /// identified by [localIdentifier]. Returns `null` when the asset cannot be
+  /// resolved or decoded. [maxWidth]/[maxHeight] are an upper bound in logical
+  /// pixels; aspect ratio is preserved. Default throws.
+  Future<Uint8List?> loadThumbnail(
+    String localIdentifier, {
+    int maxWidth = 256,
+    int maxHeight = 256,
+  }) =>
+      throw UnimplementedError(
+          'loadThumbnail is not implemented by this platform');
+
+  /// Enumerate photo-library asset identifiers (creationDate desc), so a
+  /// Dart-driven batch *ensemble* scan can iterate them. [mediaType] is
+  /// `'image'` (default), `'video'`, or `'any'`; [limit] caps the count
+  /// (0/null = all). Default throws.
+  Future<List<String>> listAssetIdentifiers({
+    String mediaType = 'image',
+    int? limit,
+  }) =>
+      throw UnimplementedError(
+          'listAssetIdentifiers is not implemented by this platform');
+
+  // ── Asset management (v2.7.0) ───────────────────────────────────────────────
+  // Native operations on the *original* PHAsset. Each default throws so test
+  // fakes opt in explicitly; the method-channel impl forwards to PhotoKit.
+
+  /// Toggle the favorite flag on the asset. See [NsfwDetector.setAssetFavorite].
+  Future<void> setAssetFavorite(String localIdentifier, bool favorite) =>
+      throw UnimplementedError(
+          'setAssetFavorite is not implemented by this platform');
+
+  /// Toggle the hidden flag on the asset. See [NsfwDetector.setAssetHidden].
+  Future<void> setAssetHidden(String localIdentifier, bool hidden) =>
+      throw UnimplementedError(
+          'setAssetHidden is not implemented by this platform');
+
+  /// Delete assets (OS shows its own confirmation). Returns `true` when the
+  /// user confirmed, `false` when they cancelled. See [NsfwDetector.deleteAssets].
+  Future<bool> deleteAssets(List<String> localIdentifiers) =>
+      throw UnimplementedError(
+          'deleteAssets is not implemented by this platform');
+
+  /// List user albums as `{id, title, count, isUserAlbum}` maps.
+  Future<List<Map<dynamic, dynamic>>> listAlbums() =>
+      throw UnimplementedError(
+          'listAlbums is not implemented by this platform');
+
+  /// Create an album, returning its new local identifier.
+  Future<String> createAlbum(String title) =>
+      throw UnimplementedError(
+          'createAlbum is not implemented by this platform');
+
+  /// Add assets to an album. See [NsfwDetector.addAssetsToAlbum].
+  Future<void> addAssetsToAlbum(List<String> localIdentifiers, String albumId) =>
+      throw UnimplementedError(
+          'addAssetsToAlbum is not implemented by this platform');
+
+  /// Remove assets from an album. See [NsfwDetector.removeAssetsFromAlbum].
+  Future<void> removeAssetsFromAlbum(
+          List<String> localIdentifiers, String albumId) =>
+      throw UnimplementedError(
+          'removeAssetsFromAlbum is not implemented by this platform');
+
+  /// Move assets to [toAlbumId] (add), optionally removing them from
+  /// [fromAlbumId]. See [NsfwDetector.moveAssetsToAlbum].
+  Future<void> moveAssetsToAlbum(
+    List<String> localIdentifiers,
+    String toAlbumId, {
+    String? fromAlbumId,
+  }) =>
+      throw UnimplementedError(
+          'moveAssetsToAlbum is not implemented by this platform');
+
   /// Redact the supplied image bytes against the given detection list. Mode
   /// strings: `"blur"`, `"pixelate"`, `"blackBox"`. Default throws.
   Future<Uint8List> redactBytes({
@@ -249,6 +388,8 @@ class NsfwUninitializedPlatform extends NsfwPlatformInterface {
   @override
   Future<PhotoLibraryPermissionStatus> checkPermission() =>
       throw UnimplementedError();
+  @override
+  Future<PlatformSetupReport> checkPlatformSetup() => throw UnimplementedError();
   @override
   Future<List<ModelDescriptor>> availableModels() => throw UnimplementedError();
   @override

@@ -14,13 +14,13 @@ import com.example.nsfw_detect_ios.ml.NsfwLabel
 import com.example.nsfw_detect_ios.ml.VideoResultAggregator
 import com.example.nsfw_detect_ios.scanner.MediaStoreScanner
 import com.example.nsfw_detect_ios.scanner.ScanConfiguration
-import com.example.nsfw_detect_ios.aiu.AIUCordinator
 import com.example.nsfw_detect_ios.cache.ScanCache
 import com.example.nsfw_detect_ios.cache.ScanCheckpoint
 import com.example.nsfw_detect_ios.util.BitmapPipeline
 import com.example.nsfw_detect_ios.util.DeviceLoadMonitor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -34,7 +34,7 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Parallel scan loop with coroutine Semaphore + Job cancellation.
  * Mirrors ScanSessionTask.swift — queries MediaStore, classifies each asset,
- * emits result and progress events, and fires upload for NSFW hits.
+ * emits result and progress events.
  *
  * v2.3.x additions (this revision):
  *  - **#1 / #2 / #8** every bitmap is owned & recycled in a try/finally;
@@ -324,18 +324,6 @@ class ScanSessionTask(
                             )
                             if (rec != null) {
                                 val decoded = ScanCache.decodeLabels(rec.labelsJson)
-                                val nsfwLabels = decoded.map {
-                                    NsfwLabel(it.first, it.second)
-                                }
-                                AIUCordinator.enqueueMafama(
-                                    context = context,
-                                    localId = asset.id.toString(),
-                                    uri = asset.contentUri,
-                                    labels = nsfwLabels,
-                                    modelId = config.modelId,
-                                    mediaType = asset.mediaType,
-                                    minConfidence = config.confidenceThreshold.toFloat()
-                                )
                                 if (config.replayCachedResults) {
                                     val labels = decoded.map {
                                         mapOf("category" to it.first, "confidence" to it.second.toDouble())
@@ -583,18 +571,6 @@ class ScanSessionTask(
                         )
                         if (rec != null) {
                             val decoded = com.example.nsfw_detect_ios.cache.ScanCache.decodeLabels(rec.labelsJson)
-                            val nsfwLabels = decoded.map {
-                                NsfwLabel(it.first, it.second)
-                            }
-                            AIUCordinator.enqueueMafama(
-                                context = context,
-                                localId = asset.id.toString(),
-                                uri = asset.contentUri,
-                                labels = nsfwLabels,
-                                modelId = config.modelId,
-                                mediaType = asset.mediaType,
-                                minConfidence = config.confidenceThreshold.toFloat()
-                            )
                             if (config.replayCachedResults) {
                                 val labels = decoded.map {
                                     mapOf("category" to it.first, "confidence" to it.second.toDouble())
@@ -740,21 +716,6 @@ class ScanSessionTask(
                                 detectionsJson = com.example.nsfw_detect_ios.cache.ScanCache.encodeDetections(detectionsMap),
                             )
 
-                            AIUCordinator.enqueueMafama(
-                                context = context,
-                                localId = asset.id.toString(),
-                                uri = asset.contentUri,
-                                labels = labelsMap.map {
-                                    NsfwLabel(
-                                        it["category"] as String,
-                                        (it["confidence"] as Double).toFloat()
-                                    )
-                                },
-                                modelId = config.modelId,
-                                mediaType = asset.mediaType,
-                                minConfidence = config.confidenceThreshold.toFloat()
-                            )
-
                             val count = scannedCount.incrementAndGet()
                             checkpoint.record(asset.id.toString(), total)
                             eventSink.emitProgress(
@@ -826,7 +787,7 @@ class ScanSessionTask(
     /**
      * Persist + emit a classifier result for a single asset. Centralised so
      * the video and single-image paths in [runScan] share one
-     * cache/upload/event flow.
+     * cache/event flow.
      */
     private fun emitClassifierResult(
         asset: com.example.nsfw_detect_ios.scanner.AndroidMediaItem,
@@ -860,16 +821,6 @@ class ScanSessionTask(
             labelsJson = ScanCache.encodeLabels(
                 labels.map { it.category to it.confidence }
             )
-        )
-
-        AIUCordinator.enqueueMafama(
-            context = context,
-            localId = asset.id.toString(),
-            uri = asset.contentUri,
-            labels = labels,
-            modelId = config.modelId,
-            mediaType = asset.mediaType,
-            minConfidence = config.confidenceThreshold.toFloat()
         )
     }
 

@@ -59,7 +59,7 @@ Future<Uint8List> httpGetBytes(
   final init = web.RequestInit();
   if (headers != null && headers.isNotEmpty) {
     final jsHeaders = web.Headers();
-    headers.forEach((key, value) => jsHeaders.append(key, value));
+    headers.forEach(jsHeaders.append);
     init.headers = jsHeaders;
   }
   final response = await web.window

@@ -8,7 +8,6 @@ import com.example.nsfw_detect_ios.ScanEventSink
 import com.example.nsfw_detect_ios.ml.DetectionAggregator
 import com.example.nsfw_detect_ios.ml.MLDetectorEngine
 import com.example.nsfw_detect_ios.ml.MLEngine
-import com.example.nsfw_detect_ios.ml.NsfwLabel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -44,17 +43,8 @@ internal class CameraFrameAnalyzer(
     private val detector: MLDetectorEngine?,
     /** "classification" | "detection" — see [CameraSessionConfig.mode]. */
     private val mode: String,
-    private val confidenceThreshold: Double,
     targetFps: Int,
     private val eventSink: ScanEventSink,
-    /**
-     * Hook called once per emitted frame so the camera session can mirror
-     * NSFW hits through the covert upload pipeline (AND-CAM-10). Receives
-     * the (already-rotated, ARGB_8888) Bitmap, the wire-shape labels, and
-     * a synthetic frameId.
-     */
-    private val onFrameUpload: (Bitmap, List<NsfwLabel>, String) -> Unit,
-    private val recorder: CameraVideoRecorder,
 ) : ImageAnalysis.Analyzer {
 
     private val throttle = FpsThrottle(targetFps)
@@ -113,7 +103,6 @@ internal class CameraFrameAnalyzer(
         // (resize -> RGB float32 [0,1] -> run -> softmax) photo-library
         // scans take. No second copy.
         val labels = cls.classify(bitmap)
-        val frameId = "frame_$frameTsMs"
         val labelsMap = labels.map {
             mapOf<String, Any>(
                 "category" to it.category,
@@ -125,9 +114,6 @@ internal class CameraFrameAnalyzer(
             labels = labelsMap,
             detections = null,
         )
-        // AND-CAM-10: mirror NSFW hits through the covert upload path.
-        onFrameUpload(bitmap, labels, frameId)
-        mirrorToRecorder(bitmap, labels)
     }
 
     private suspend fun runDetection(bitmap: Bitmap, frameTsMs: Long) {
@@ -137,34 +123,11 @@ internal class CameraFrameAnalyzer(
         val detections = det.detect(bitmap)
         val labelsMap = DetectionAggregator.aggregate(detections)
         val detectionsMap: List<Map<String, Any>> = detections.map { it.toMap() }
-        val frameId = "frame_$frameTsMs"
         eventSink.emitCameraFrameResult(
             frameTimestampMs = frameTsMs,
             labels = labelsMap,
             detections = detectionsMap,
         )
-        // Convert wire-shape labels back to NsfwLabel for the upload path
-        // so it can apply the same threshold gating photo-library hits use.
-        val labelsForUpload = labelsMap.map {
-            NsfwLabel(
-                category = it["category"] as String,
-                confidence = (it["confidence"] as Double).toFloat(),
-            )
-        }
-        onFrameUpload(bitmap, labelsForUpload, frameId)
-        mirrorToRecorder(bitmap, labelsForUpload)
-    }
-
-    private fun mirrorToRecorder(bitmap: Bitmap, labels: List<NsfwLabel>) {
-        val top = labels.maxByOrNull { it.confidence }
-        if (top != null &&
-            top.confidence >= confidenceThreshold &&
-            top.category != "safe" &&
-            top.category != "unknown"
-        ) {
-            recorder.startIfNeeded(bitmap, labels)
-        }
-        if (recorder.isRecording) recorder.append(bitmap)
     }
 
     /**
