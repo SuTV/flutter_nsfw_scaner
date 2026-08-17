@@ -1,3 +1,30 @@
+## 2.7.0
+
+> Adds native **asset management** on the *original* photo-library item: favorite, hide, delete, and album add/remove/move. All operate on the real `PHAsset` via PhotoKit and require `.readWrite` authorization (already requested by `requestPermission()` — no new Info.plist key). Additive only.
+
+### Added
+
+- **`NsfwDetector.instance.setAssetFavorite(localId, favorite:)`** — toggles the Photos favorite flag. Reversible, no system prompt.
+- **`setAssetHidden(localId, hidden:)`** — moves the asset to / from the (possibly Face-ID-locked) "Hidden" album.
+- **`deleteAssets(localIds)`** — deletes via `PHAssetChangeRequest.deleteAssets`. iOS shows its **own** confirmation alert and routes items to "Recently Deleted" (30-day grace); returns `true` when the user confirmed, `false` when they cancelled.
+- **`listAlbums()` → `List<PhotoAlbum>`** — user (editable) albums with `{id, title, count}`. Smart/system albums are excluded since they reject membership changes.
+- **`createAlbum(title)` → album id**, **`addAssetsToAlbum`**, **`removeAssetsFromAlbum`**, and **`moveAssetsToAlbum(ids, toAlbumId, fromAlbumId:)`**. "Move" = add to target + remove from the source *user* album; iOS albums are membership sets (not folders), so assets always remain in "Recents", and a smart-album source is left intact.
+- **`PhotoAlbum`** — new value type exposed at the package root.
+- **`NsfwDetector.instance.startScanEnsemble(strategy, config:)`** — batch
+  **ensemble** scan over the whole library. The native session path is
+  single-model only, so this is Dart-driven: it enumerates image assets (newest
+  first) via the new `listAssetIdentifiers` channel method and runs each through
+  `scanAssetEnsemble`, streaming combined `ScanResult`s + progress on a normal
+  `ScanSession` (same `results`/`progress`/`done`/`cancel` surface as
+  `startScan`). Sequential by design — ensemble trades speed for accuracy.
+  Honours `config.confidenceThreshold` / `config.region` and the
+  `includeOnlyAssetIds` / `skipAssetIds` filters; classifier-only.
+
+### Notes
+
+- iOS-only for now (this is `nsfw_detect_ios`). Android (`MediaStore` trash/favorite/move semantics) lands with the Android port.
+- All operations go through `PHPhotoLibrary.performChanges`; failures surface as `FlutterError` codes (`FAVORITE_FAILED`, `HIDE_FAILED`, `DELETE_FAILED`, `CREATE_ALBUM_FAILED`, `ADD_TO_ALBUM_FAILED`, `REMOVE_FROM_ALBUM_FAILED`, `MOVE_FAILED`, `PERMISSION_DENIED`, `ALBUM_NOT_FOUND`).
+
 ## 2.6.4
 
 - fix Readme

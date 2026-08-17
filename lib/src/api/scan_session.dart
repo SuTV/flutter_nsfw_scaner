@@ -39,6 +39,9 @@ class ScanSession {
 
   bool _isRunning = false;
   bool _isCancelled = false;
+  // Dart-driven ensemble mode has no native session — cancel() must not call
+  // the native cancelScan and the loop polls [_isCancelled] between assets.
+  bool _ensembleMode = false;
 
   int _nsfwCount = 0;
   int _skippedCount = 0;
@@ -97,6 +100,38 @@ class ScanSession {
       decisionLookup: decisionLookup,
     );
     await session._beginPicker(maxItems);
+    return session;
+  }
+
+  /// Dart-driven **batch ensemble** scan. The native session path is
+  /// single-model only, so this enumerates the library via [listAssetIds] and
+  /// runs each asset through [scanAsset] (an ensemble fan-out + combine),
+  /// streaming the combined [ScanResult]s and progress on the same channels as
+  /// [start]. Sequential by design — ensemble is 2-3× the per-asset cost.
+  ///
+  /// [scanAsset] should throw to signal a per-asset failure; the loop records
+  /// it and continues. Honour [cancel] between assets.
+  static Future<ScanSession> startEnsemble({
+    required ScanConfiguration config,
+    required NsfwPlatformInterface platform,
+    required Future<List<String>> Function() listAssetIds,
+    required Future<ScanResult> Function(String localId) scanAsset,
+    TelemetryHandler? telemetrySink,
+    bool includeLocalIds = false,
+    DecisionLookup? decisionLookup,
+  }) async {
+    final session = ScanSession._(
+      config: config,
+      platform: platform,
+      telemetrySink: telemetrySink,
+      includeLocalIds: includeLocalIds,
+      decisionLookup: decisionLookup,
+    );
+    session._ensembleMode = true;
+    session._isRunning = true;
+    session._startTime = DateTime.now();
+    // Drive the loop without blocking the caller — results arrive on [results].
+    unawaited(session._runEnsembleLoop(listAssetIds, scanAsset));
     return session;
   }
 
@@ -160,6 +195,63 @@ class ScanSession {
     );
 
     await _platform.startScan(_config);
+  }
+
+  /// Drives the Dart-side ensemble batch scan (see [startEnsemble]).
+  Future<void> _runEnsembleLoop(
+    Future<List<String>> Function() listAssetIds,
+    Future<ScanResult> Function(String localId) scanAsset,
+  ) async {
+    try {
+      final ids = _filterIds(await listAssetIds());
+      _totalCount = ids.length;
+      _emitProgress(scanned: 0, isComplete: ids.isEmpty);
+
+      var scanned = 0;
+      for (final id in ids) {
+        if (_isCancelled) break;
+        try {
+          _emitResult(await scanAsset(id));
+        } catch (e, st) {
+          _failedCount++;
+          if (kDebugMode) {
+            dev.log('[NSFW] ENSEMBLE asset failed: $id — $e',
+                name: 'nsfw_detect_ios', stackTrace: st);
+          }
+        }
+        scanned++;
+        _emitProgress(scanned: scanned, isComplete: scanned >= _totalCount);
+      }
+      if (!_summaryCompleter.isCompleted) _finish(cancelled: _isCancelled);
+    } catch (e) {
+      // Enumeration itself failed — surface to listeners, then finish.
+      _handleError(e);
+      if (!_summaryCompleter.isCompleted) _finish(cancelled: _isCancelled);
+    }
+  }
+
+  /// Pre-filters the enumerated ids by the config's include/skip lists so the
+  /// ensemble loop doesn't spend inference on assets it would drop anyway.
+  List<String> _filterIds(List<String> ids) {
+    if (_config.includeOnlyAssetIds.isNotEmpty) {
+      final keep = _config.includeOnlyAssetIds;
+      return ids.where(keep.contains).toList();
+    }
+    if (_config.skipAssetIds.isNotEmpty) {
+      final skip = _config.skipAssetIds;
+      return ids.where((id) => !skip.contains(id)).toList();
+    }
+    return ids;
+  }
+
+  /// Emits an enriched progress update for the ensemble loop.
+  void _emitProgress({required int scanned, required bool isComplete}) {
+    if (_progressController.isClosed) return;
+    _progressController.add(_enrichProgress(ScanProgress(
+      scannedCount: scanned,
+      totalCount: _totalCount,
+      isComplete: isComplete,
+    )));
   }
 
   void _handleEvent(Map<dynamic, dynamic> event) {
@@ -260,9 +352,19 @@ class ScanSession {
         }
       }
     }
-    var result = ScanResult.fromMap(event,
+    final parsed = ScanResult.fromMap(event,
         confidenceThreshold: _config.confidenceThreshold,
         thresholdsByCategory: _config.thresholdsByCategory);
+    _emitResult(parsed);
+  }
+
+  /// Applies decision overrides + Dart-side include/skip filters, updates the
+  /// running counters and telemetry, then pushes the result to listeners.
+  /// Shared by the native event path ([_ingestResult]) and the Dart-driven
+  /// ensemble path ([_runEnsembleLoop]).
+  void _emitResult(ScanResult input) {
+    if (_resultsController.isClosed) return;
+    var result = input;
     final decision = _decisionLookup?.call(result.item.localIdentifier);
     if (decision != null) result = result.withUserDecision(decision);
 
@@ -349,7 +451,8 @@ class ScanSession {
   Future<void> cancel() async {
     if (!_isRunning) return;
     _isCancelled = true;
-    await _platform.cancelScan();
+    // Ensemble mode has no native session — the loop stops at the next asset.
+    if (!_ensembleMode) await _platform.cancelScan();
     _emitTelemetry(
       TelemetryEvent.cancelHonored(modelId: _config.modelId),
     );

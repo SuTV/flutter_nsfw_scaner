@@ -286,6 +286,94 @@ class NsfwMethodChannel extends NsfwPlatformInterface {
   }
 
   @override
+  Future<List<String>> listAssetIdentifiers({
+    String mediaType = 'image',
+    int? limit,
+  }) async {
+    final result = await _methodChannel.invokeListMethod<String>(
+      'listAssetIdentifiers',
+      {
+        'mediaType': mediaType,
+        if (limit != null) 'limit': limit,
+      },
+    );
+    return result ?? const [];
+  }
+
+  @override
+  Future<void> setAssetFavorite(String localIdentifier, bool favorite) async {
+    await _methodChannel.invokeMethod<void>('setAssetFavorite', {
+      'localId': localIdentifier,
+      'favorite': favorite,
+    });
+  }
+
+  @override
+  Future<void> setAssetHidden(String localIdentifier, bool hidden) async {
+    await _methodChannel.invokeMethod<void>('setAssetHidden', {
+      'localId': localIdentifier,
+      'hidden': hidden,
+    });
+  }
+
+  @override
+  Future<bool> deleteAssets(List<String> localIdentifiers) async {
+    final confirmed = await _methodChannel.invokeMethod<bool>('deleteAssets', {
+      'localIds': localIdentifiers,
+    });
+    return confirmed ?? false;
+  }
+
+  @override
+  Future<List<Map<dynamic, dynamic>>> listAlbums() async {
+    final result =
+        await _methodChannel.invokeListMethod<Map<dynamic, dynamic>>('listAlbums');
+    return result ?? const [];
+  }
+
+  @override
+  Future<String> createAlbum(String title) async {
+    final id = await _methodChannel.invokeMethod<String>('createAlbum', {
+      'title': title,
+    });
+    if (id == null || id.isEmpty) {
+      throw StateError('createAlbum returned no album identifier');
+    }
+    return id;
+  }
+
+  @override
+  Future<void> addAssetsToAlbum(
+      List<String> localIdentifiers, String albumId) async {
+    await _methodChannel.invokeMethod<void>('addAssetsToAlbum', {
+      'localIds': localIdentifiers,
+      'albumId': albumId,
+    });
+  }
+
+  @override
+  Future<void> removeAssetsFromAlbum(
+      List<String> localIdentifiers, String albumId) async {
+    await _methodChannel.invokeMethod<void>('removeAssetsFromAlbum', {
+      'localIds': localIdentifiers,
+      'albumId': albumId,
+    });
+  }
+
+  @override
+  Future<void> moveAssetsToAlbum(
+    List<String> localIdentifiers,
+    String toAlbumId, {
+    String? fromAlbumId,
+  }) async {
+    await _methodChannel.invokeMethod<void>('moveAssetsToAlbum', {
+      'localIds': localIdentifiers,
+      'toAlbumId': toAlbumId,
+      if (fromAlbumId != null) 'fromAlbumId': fromAlbumId,
+    });
+  }
+
+  @override
   Future<Uint8List> redactBytes({
     required Uint8List bytes,
     required List<Map<String, Object?>> detections,

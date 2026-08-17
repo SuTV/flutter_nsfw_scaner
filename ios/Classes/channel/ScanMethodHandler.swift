@@ -845,9 +845,255 @@ final class ScanMethodHandler: NSObject, FlutterPlugin {
             let maxH = (args?["maxHeight"] as? Int) ?? 256
             loadThumbnail(localId: localId, maxWidth: maxW, maxHeight: maxH, result: result)
 
+        // MARK: Asset management (v2.7.0)
+
+        case ChannelConstants.Method.setAssetFavorite:
+            guard let localId = args?["localId"] as? String,
+                  let favorite = args?["favorite"] as? Bool else {
+                result(FlutterError(code: "INVALID_ARGS",
+                                    message: "localId and favorite required", details: nil))
+                return
+            }
+            guard ensureWriteAuthorized(result) else { return }
+            let assets = fetchAssets([localId])
+            guard !assets.isEmpty else {
+                result(FlutterError(code: "ASSET_NOT_FOUND",
+                                    message: "No asset for localId \(localId)", details: nil))
+                return
+            }
+            performLibraryChange({
+                for asset in assets { PHAssetChangeRequest(for: asset).isFavorite = favorite }
+            }, errorCode: "FAVORITE_FAILED", result: result)
+
+        case ChannelConstants.Method.setAssetHidden:
+            guard let localId = args?["localId"] as? String,
+                  let hidden = args?["hidden"] as? Bool else {
+                result(FlutterError(code: "INVALID_ARGS",
+                                    message: "localId and hidden required", details: nil))
+                return
+            }
+            guard ensureWriteAuthorized(result) else { return }
+            let assets = fetchAssets([localId])
+            guard !assets.isEmpty else {
+                result(FlutterError(code: "ASSET_NOT_FOUND",
+                                    message: "No asset for localId \(localId)", details: nil))
+                return
+            }
+            performLibraryChange({
+                for asset in assets { PHAssetChangeRequest(for: asset).isHidden = hidden }
+            }, errorCode: "HIDE_FAILED", result: result)
+
+        case ChannelConstants.Method.deleteAssets:
+            let ids = (args?["localIds"] as? [String]) ?? []
+            guard ensureWriteAuthorized(result) else { return }
+            let assets = fetchAssets(ids)
+            guard !assets.isEmpty else { result(false); return }
+            // iOS shows its own confirmation alert and routes to "Recently
+            // Deleted" — we cannot bypass it. `success == false` with a
+            // userCancelled error means the user declined: report as `false`,
+            // not an error.
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetChangeRequest.deleteAssets(assets as NSArray)
+            }, completionHandler: { success, error in
+                DispatchQueue.main.async {
+                    if success {
+                        result(true)
+                    } else if let phErr = error as? PHPhotosError,
+                              phErr.code == .userCancelled {
+                        result(false)
+                    } else {
+                        result(FlutterError(code: "DELETE_FAILED",
+                                            message: error?.localizedDescription ?? "delete failed",
+                                            details: nil))
+                    }
+                }
+            })
+
+        case ChannelConstants.Method.listAlbums:
+            guard ensureWriteAuthorized(result) else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                var albums: [[String: Any]] = []
+                let userAlbums = PHAssetCollection.fetchAssetCollections(
+                    with: .album, subtype: .albumRegular, options: nil)
+                userAlbums.enumerateObjects { collection, _, _ in
+                    let count = PHAsset.fetchAssets(in: collection, options: nil).count
+                    albums.append([
+                        "id": collection.localIdentifier,
+                        "title": collection.localizedTitle ?? "",
+                        "count": count,
+                        "isUserAlbum": true,
+                    ])
+                }
+                DispatchQueue.main.async { result(albums) }
+            }
+
+        case ChannelConstants.Method.createAlbum:
+            guard let title = (args?["title"] as? String), !title.isEmpty else {
+                result(FlutterError(code: "INVALID_ARGS", message: "title required", details: nil))
+                return
+            }
+            guard ensureWriteAuthorized(result) else { return }
+            var placeholderId: String?
+            PHPhotoLibrary.shared().performChanges({
+                let req = PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: title)
+                placeholderId = req.placeholderForCreatedAssetCollection.localIdentifier
+            }, completionHandler: { success, error in
+                DispatchQueue.main.async {
+                    if success, let id = placeholderId {
+                        result(id)
+                    } else {
+                        result(FlutterError(code: "CREATE_ALBUM_FAILED",
+                                            message: error?.localizedDescription ?? "create failed",
+                                            details: nil))
+                    }
+                }
+            })
+
+        case ChannelConstants.Method.addAssetsToAlbum:
+            handleAlbumMembership(args: args, add: true, result: result)
+
+        case ChannelConstants.Method.removeAssetsFromAlbum:
+            handleAlbumMembership(args: args, add: false, result: result)
+
+        case ChannelConstants.Method.listAssetIdentifiers:
+            guard PhotoLibraryPermission.hostHasUsageDescription else {
+                result(FlutterError(
+                    code: "MISSING_USAGE_DESCRIPTION",
+                    message: "Host app Info.plist is missing NSPhotoLibraryUsageDescription.",
+                    details: nil))
+                return
+            }
+            // Mirrors the scan-session enumeration (creationDate desc, image by
+            // default) so the Dart-driven ensemble scan visits assets in the
+            // same order as `startScan`.
+            let mediaTypeStr = (args?["mediaType"] as? String) ?? "image"
+            let limit = args?["limit"] as? Int
+            DispatchQueue.global(qos: .userInitiated).async {
+                let opts = PHFetchOptions()
+                opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+                switch mediaTypeStr {
+                case "image":
+                    opts.predicate = NSPredicate(
+                        format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+                case "video":
+                    opts.predicate = NSPredicate(
+                        format: "mediaType == %d", PHAssetMediaType.video.rawValue)
+                default:
+                    break // "any" — no predicate
+                }
+                if let limit = limit, limit > 0 { opts.fetchLimit = limit }
+                let fetch = PHAsset.fetchAssets(with: opts)
+                var ids: [String] = []
+                ids.reserveCapacity(fetch.count)
+                fetch.enumerateObjects { asset, _, _ in ids.append(asset.localIdentifier) }
+                DispatchQueue.main.async { result(ids) }
+            }
+
+        case ChannelConstants.Method.moveAssetsToAlbum:
+            guard let toAlbumId = args?["toAlbumId"] as? String else {
+                result(FlutterError(code: "INVALID_ARGS", message: "toAlbumId required", details: nil))
+                return
+            }
+            guard ensureWriteAuthorized(result) else { return }
+            let ids = (args?["localIds"] as? [String]) ?? []
+            let assets = fetchAssets(ids)
+            guard let target = fetchCollection(toAlbumId) else {
+                result(FlutterError(code: "ALBUM_NOT_FOUND",
+                                    message: "No album for id \(toAlbumId)", details: nil))
+                return
+            }
+            // Optional source: iOS albums are membership sets, not folders, so
+            // "move" = add to target (+ remove from the source user album when
+            // given). Smart albums / "Recents" yield a nil change request and
+            // are silently left intact.
+            let source = (args?["fromAlbumId"] as? String).flatMap { fetchCollection($0) }
+            performLibraryChange({
+                if let addReq = PHAssetCollectionChangeRequest(for: target) {
+                    addReq.addAssets(assets as NSArray)
+                }
+                if let source = source,
+                   let remReq = PHAssetCollectionChangeRequest(for: source) {
+                    remReq.removeAssets(assets as NSArray)
+                }
+            }, errorCode: "MOVE_FAILED", result: result)
+
         default:
             result(FlutterMethodNotImplemented)
         }
+    }
+
+    // MARK: - Asset management helpers (v2.7.0)
+
+    /// `.readWrite` gate for the mutating asset operations. Returns `true` when
+    /// the change may proceed; otherwise sends a `PERMISSION_DENIED` error and
+    /// returns `false`. `.limited` is allowed — PhotoKit just scopes the change
+    /// to the assets the user has shared.
+    private func ensureWriteAuthorized(_ result: @escaping FlutterResult) -> Bool {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if status == .authorized || status == .limited { return true }
+        result(FlutterError(code: "PERMISSION_DENIED",
+                            message: "Photo library write access not granted.",
+                            details: nil))
+        return false
+    }
+
+    /// Resolves local identifiers to `PHAsset`s, preserving none that are missing.
+    private func fetchAssets(_ localIds: [String]) -> [PHAsset] {
+        guard !localIds.isEmpty else { return [] }
+        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: localIds, options: nil)
+        var assets: [PHAsset] = []
+        fetch.enumerateObjects { asset, _, _ in assets.append(asset) }
+        return assets
+    }
+
+    /// Resolves an album's local identifier to its `PHAssetCollection`.
+    private func fetchCollection(_ localId: String) -> PHAssetCollection? {
+        PHAssetCollection.fetchAssetCollections(
+            withLocalIdentifiers: [localId], options: nil).firstObject
+    }
+
+    /// Runs a photo-library mutation, mapping success → `nil` and failure → a
+    /// `FlutterError(errorCode)`. Completion is marshaled back to the main thread.
+    private func performLibraryChange(
+        _ changes: @escaping () -> Void,
+        errorCode: String,
+        result: @escaping FlutterResult
+    ) {
+        PHPhotoLibrary.shared().performChanges(changes) { success, error in
+            DispatchQueue.main.async {
+                if success {
+                    result(nil)
+                } else {
+                    result(FlutterError(code: errorCode,
+                                        message: error?.localizedDescription ?? "change failed",
+                                        details: nil))
+                }
+            }
+        }
+    }
+
+    /// Shared add/remove album-membership handler. `PHAssetCollectionChangeRequest(for:)`
+    /// returns nil for non-editable collections (smart albums), so those no-op.
+    private func handleAlbumMembership(
+        args: [String: Any]?, add: Bool, result: @escaping FlutterResult
+    ) {
+        guard let albumId = args?["albumId"] as? String else {
+            result(FlutterError(code: "INVALID_ARGS", message: "albumId required", details: nil))
+            return
+        }
+        guard ensureWriteAuthorized(result) else { return }
+        let ids = (args?["localIds"] as? [String]) ?? []
+        let assets = fetchAssets(ids)
+        guard let album = fetchCollection(albumId) else {
+            result(FlutterError(code: "ALBUM_NOT_FOUND",
+                                message: "No album for id \(albumId)", details: nil))
+            return
+        }
+        performLibraryChange({
+            guard let req = PHAssetCollectionChangeRequest(for: album) else { return }
+            if add { req.addAssets(assets as NSArray) }
+            else { req.removeAssets(assets as NSArray) }
+        }, errorCode: add ? "ADD_TO_ALBUM_FAILED" : "REMOVE_FROM_ALBUM_FAILED", result: result)
     }
 
     /// Loads a downscaled JPEG thumbnail for a photo-library asset and returns

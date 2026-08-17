@@ -22,6 +22,7 @@ export 'src/api/scan_region.dart';
 export 'src/api/body_part_detection.dart';
 export 'src/api/scan_session.dart';
 export 'src/api/picked_media.dart';
+export 'src/api/photo_album.dart';
 export 'src/api/media_picker_type.dart';
 export 'src/api/scan_decision.dart';
 export 'src/api/scan_summary.dart';
